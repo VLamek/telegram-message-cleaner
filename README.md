@@ -36,6 +36,8 @@ It authenticates through Telegram MTProto as a user account with `Telethon`, ind
 - Deletion is irreversible.
 - Telegram may refuse or limit some deletion operations depending on chat type, permissions, historical limits, service-message behavior, or API restrictions.
 - Some message IDs may remain failed even after retries.
+- The app now verifies after each delete request whether the target `message_id` actually disappeared. If Telegram leaves some items behind, they stay tracked as `failed` instead of being reported as deleted.
+- Poll messages sent by the user can be deleted when Telegram allows it, but resetting poll votes themselves is not guaranteed by Telegram.
 - Session files must never be shared with another person.
 
 ## Requirements
@@ -60,6 +62,14 @@ pip install -r requirements.txt
 
 Do not share your API Hash or your session file.
 
+## Local safety against git commits
+
+When you run the app from source inside a git repository, the app now keeps its persistent local data outside the repository by default, in the current user's local application data directory.
+
+This is done so values entered into the GUI, such as API credentials, phone number, local session state, database progress, and logs, do not end up as normal files inside the repo and do not get committed accidentally.
+
+If you explicitly choose a custom database path inside the repository, the app also adds that runtime path to the local git exclude file when possible.
+
 ## How to run from Python
 
 GUI:
@@ -74,6 +84,7 @@ CLI fallback:
 python telegram_cleanup_cli.py list
 python telegram_cleanup_cli.py index --chat-id CHAT_ID
 python telegram_cleanup_cli.py delete --chat-id CHAT_ID
+python telegram_cleanup_cli.py delete-indexed --chat-id CHAT_ID
 python telegram_cleanup_cli.py retry-failed --chat-id CHAT_ID
 ```
 
@@ -117,7 +128,14 @@ After successful authorization, the app shows available account information such
 
 Click `List groups`.
 
-The GUI log will print dialog metadata such as:
+The app opens a separate chat selection window with:
+
+- a search field
+- a scrollable table of dialogs
+- double-click selection
+- automatic filling of the chosen `chat_id` back into the main window
+
+The GUI log will also print dialog metadata such as:
 
 - title
 - id
@@ -128,7 +146,7 @@ This action does not delete anything.
 
 ### 3. Enter one Chat ID
 
-Paste one explicit Telegram `chat_id` into the `Chat ID` field.
+Paste one explicit Telegram `chat_id` into the `Chat ID` field, or select it from the graphical chat picker opened by `List groups`.
 
 The app is intentionally limited to one chat per cleanup run.
 
@@ -143,6 +161,7 @@ Then click:
 
 - `Index only` if you want only the metadata pass
 - `Start cleanup` if you want indexing followed by deletion
+- `Delete indexed only` if you want to delete the already indexed subset immediately without waiting for a full indexing pass
 
 If `Require confirmation before deletion` is enabled, the app resolves the chat first and then shows a confirmation dialog with:
 
@@ -165,6 +184,8 @@ It does not store:
 
 It stores only local progress metadata in SQLite so the app can resume later and avoid duplicating already known records.
 
+If indexing is interrupted, the app now saves its local resume cursor and the next indexing run continues from the saved point in the older history direction while also checking for newer messages that appeared later.
+
 ### 6. Why indexing is needed
 
 Indexing is required because the app needs a known local list of message IDs before deletion can show meaningful:
@@ -183,6 +204,7 @@ During indexing, progress is count-based rather than true percentage-based becau
 - `Pause after current batch` finishes the active batch, saves SQLite state, and pauses safely.
 - `Stop after current batch` finishes the active batch, saves SQLite state, and stops safely.
 - To resume later, run the app again, enter the same `chat_id`, and click `Start cleanup`.
+- If you only want to delete the already discovered subset first, use `Delete indexed only` in the GUI or `delete-indexed` in the CLI.
 
 If new messages appeared in the same chat after a previous run, a new indexing pass adds only new message IDs without duplicating older records.
 
@@ -194,7 +216,11 @@ The app still does not store message content during this process.
 
 ## Local database and logs
 
-Default local files are kept next to the Python scripts during development, and next to the `.exe` when running as a frozen Windows build:
+When running from source during development, local runtime files are stored in the current user's local app data folder, typically under:
+
+- `%LOCALAPPDATA%\\TelegramMessageCleaner\\`
+
+When running as a frozen Windows build, local runtime files are kept next to the `.exe`:
 
 - `telegram_message_cleaner_config.json`
 - `telegram_message_cleaner.session`

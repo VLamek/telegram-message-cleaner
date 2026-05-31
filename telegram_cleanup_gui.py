@@ -28,9 +28,14 @@ class TelegramCleanupGUI:
         self.current_control: RunControl | None = None
         self.pending_cleanup_request: dict[str, Any] | None = None
         self.current_auth_status = "not configured"
+        self.chat_selector_window: tk.Toplevel | None = None
+        self.chat_selector_search_var = tk.StringVar()
+        self.chat_selector_dialogs: list[dict[str, Any]] = []
+        self.chat_selector_filtered_dialogs: list[dict[str, Any]] = []
 
         self._create_variables()
         self._build_layout()
+        self._setup_clipboard_support()
         self._apply_saved_config()
         self._apply_theme()
         self._refresh_translations()
@@ -198,6 +203,7 @@ class TelegramCleanupGUI:
         self.list_groups_button = ttk.Button(self.cleanup_frame, command=self._list_groups)
         self.index_only_button = ttk.Button(self.cleanup_frame, command=self._index_only)
         self.start_cleanup_button = ttk.Button(self.cleanup_frame, command=self._start_cleanup)
+        self.delete_indexed_only_button = ttk.Button(self.cleanup_frame, command=self._delete_indexed_only)
         self.pause_after_batch_button = ttk.Button(self.cleanup_frame, command=self._pause_after_batch)
         self.stop_after_batch_button = ttk.Button(self.cleanup_frame, command=self._stop_after_batch)
         self.retry_failed_button = ttk.Button(self.cleanup_frame, command=self._retry_failed)
@@ -208,12 +214,14 @@ class TelegramCleanupGUI:
         self.start_cleanup_button.grid(row=1, column=2, sticky="ew", padx=6, pady=8)
         self.pause_after_batch_button.grid(row=1, column=3, sticky="ew", padx=6, pady=8)
         self.stop_after_batch_button.grid(row=1, column=4, sticky="ew", padx=6, pady=8)
-        self.retry_failed_button.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 8))
-        self.delete_local_db_button.grid(row=2, column=1, columnspan=2, sticky="ew", padx=6, pady=(0, 8))
+        self.delete_indexed_only_button.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 8))
+        self.retry_failed_button.grid(row=2, column=1, sticky="ew", padx=6, pady=(0, 8))
+        self.delete_local_db_button.grid(row=2, column=2, columnspan=2, sticky="ew", padx=6, pady=(0, 8))
 
         self._register_widget_text(self.list_groups_button, "list_groups")
         self._register_widget_text(self.index_only_button, "index_only")
         self._register_widget_text(self.start_cleanup_button, "start_cleanup")
+        self._register_widget_text(self.delete_indexed_only_button, "delete_indexed_only")
         self._register_widget_text(self.pause_after_batch_button, "pause_after_batch")
         self._register_widget_text(self.stop_after_batch_button, "stop_after_batch")
         self._register_widget_text(self.retry_failed_button, "retry_failed")
@@ -305,6 +313,118 @@ class TelegramCleanupGUI:
         self.language_combo.bind("<<ComboboxSelected>>", self._on_language_changed)
         self.theme_combo.bind("<<ComboboxSelected>>", self._on_theme_changed)
 
+    def _setup_clipboard_support(self) -> None:
+        self.entry_context_menu = tk.Menu(self.root, tearoff=0)
+        self.entry_context_menu.add_command(label="Cut", command=lambda: self._entry_context_action("cut"))
+        self.entry_context_menu.add_command(label="Copy", command=lambda: self._entry_context_action("copy"))
+        self.entry_context_menu.add_command(label="Paste", command=lambda: self._entry_context_action("paste"))
+        self.entry_context_menu.add_separator()
+        self.entry_context_menu.add_command(
+            label="Select all",
+            command=lambda: self._entry_context_action("select_all"),
+        )
+        self._context_menu_target: tk.Widget | None = None
+
+        self.root.bind_class("TEntry", "<Control-v>", self._handle_entry_paste, add="+")
+        self.root.bind_class("TEntry", "<Control-V>", self._handle_entry_paste, add="+")
+        self.root.bind_class("TEntry", "<Shift-Insert>", self._handle_entry_paste, add="+")
+        self.root.bind_class("TEntry", "<<Paste>>", self._handle_entry_paste, add="+")
+        self.root.bind_class("TEntry", "<Button-3>", self._show_entry_context_menu, add="+")
+        self.root.bind_class("TEntry", "<Control-a>", self._select_all_entry_text, add="+")
+        self.root.bind_class("TEntry", "<Control-A>", self._select_all_entry_text, add="+")
+
+        # On Windows, Ctrl+V with a non-English keyboard layout may not trigger <Control-v>.
+        self.root.bind_all("<Control-KeyPress>", self._handle_control_keypress, add="+")
+
+    def _handle_control_keypress(self, event: tk.Event) -> str | None:
+        widget = self._get_editable_entry_widget(event.widget)
+        if not widget:
+            return None
+        if event.keycode == 86:
+            return self._paste_into_entry(widget)
+        if event.keycode == 65:
+            return self._select_all_entry_widget(widget)
+        return None
+
+    def _handle_entry_paste(self, event: tk.Event) -> str | None:
+        widget = self._get_editable_entry_widget(event.widget)
+        if not widget:
+            return None
+        return self._paste_into_entry(widget)
+
+    def _show_entry_context_menu(self, event: tk.Event) -> str | None:
+        widget = self._get_editable_entry_widget(event.widget)
+        if not widget:
+            return None
+        self._context_menu_target = widget
+        try:
+            self.entry_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.entry_context_menu.grab_release()
+        return "break"
+
+    def _entry_context_action(self, action: str) -> None:
+        widget = self._get_editable_entry_widget(self._context_menu_target)
+        if not widget:
+            return
+        widget.focus_set()
+        if action == "cut":
+            widget.event_generate("<<Cut>>")
+            return
+        if action == "copy":
+            widget.event_generate("<<Copy>>")
+            return
+        if action == "paste":
+            self._paste_into_entry(widget)
+            return
+        if action == "select_all":
+            self._select_all_entry_widget(widget)
+
+    def _select_all_entry_text(self, event: tk.Event) -> str | None:
+        widget = self._get_editable_entry_widget(event.widget)
+        if not widget:
+            return None
+        return self._select_all_entry_widget(widget)
+
+    def _select_all_entry_widget(self, widget: tk.Widget) -> str | None:
+        try:
+            widget.selection_range(0, "end")
+            widget.icursor("end")
+        except tk.TclError:
+            return None
+        return "break"
+
+    def _paste_into_entry(self, widget: tk.Widget) -> str | None:
+        try:
+            clipboard_text = self.root.clipboard_get()
+        except tk.TclError:
+            return "break"
+
+        try:
+            if widget.selection_present():
+                widget.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass
+
+        try:
+            insert_at = widget.index("insert")
+            widget.insert(insert_at, clipboard_text)
+        except tk.TclError:
+            return None
+        return "break"
+
+    def _get_editable_entry_widget(self, widget: Any) -> tk.Widget | None:
+        if not isinstance(widget, tk.Widget):
+            return None
+        if widget.winfo_class() not in {"Entry", "TEntry"}:
+            return None
+        try:
+            if str(widget.cget("state")) == "disabled":
+                return None
+        except tk.TclError:
+            return None
+        return widget
+
     def _apply_saved_config(self) -> None:
         self.language_var.set(self.core.get_config().get("language", "en"))
         self.theme_var.set(self.core.get_config().get("theme", "Light"))
@@ -328,6 +448,13 @@ class TelegramCleanupGUI:
                 continue
             seen.add(marker)
             widget.configure(**{option: self.translator.gettext(key)})
+
+        if self.chat_selector_window and self.chat_selector_window.winfo_exists():
+            self.chat_selector_window.title(self.translator.gettext("select_chat"))
+            self.chat_selector_tree.heading("title", text=self.translator.gettext("chat_title_column"))
+            self.chat_selector_tree.heading("id", text=self.translator.gettext("chat_id_column"))
+            self.chat_selector_tree.heading("username", text=self.translator.gettext("chat_username_column"))
+            self.chat_selector_tree.heading("type", text=self.translator.gettext("chat_type_column"))
 
         self._set_auth_status_text(self.current_auth_status)
 
@@ -366,6 +493,13 @@ class TelegramCleanupGUI:
         style.configure("TEntry", fieldbackground=field_bg, foreground=fg, insertcolor=fg)
         style.configure("TCombobox", fieldbackground=field_bg, foreground=fg)
         style.map("TCombobox", fieldbackground=[("readonly", field_bg)])
+        style.configure("ChatSelector.Treeview", background=field_bg, fieldbackground=field_bg, foreground=fg)
+        style.configure("ChatSelector.Treeview.Heading", background=button_bg, foreground=fg)
+        style.map(
+            "ChatSelector.Treeview",
+            background=[("selected", "#4e8dd6")],
+            foreground=[("selected", "#ffffff")],
+        )
         style.configure(
             "Horizontal.TProgressbar",
             troughcolor=field_bg,
@@ -381,6 +515,8 @@ class TelegramCleanupGUI:
             selectbackground="#4e8dd6",
             selectforeground="#ffffff",
         )
+        if self.chat_selector_window and self.chat_selector_window.winfo_exists():
+            self.chat_selector_window.configure(bg=bg)
 
     def _save_credentials(self) -> None:
         api_id = self.api_id_var.get().strip()
@@ -418,6 +554,9 @@ class TelegramCleanupGUI:
     def _list_groups(self) -> None:
         self._launch_worker("list_groups", self.core.list_groups)
 
+    def _refresh_chat_list(self) -> None:
+        self._list_groups()
+
     def _index_only(self) -> None:
         chat_id = self._require_chat_id()
         if not chat_id:
@@ -435,6 +574,7 @@ class TelegramCleanupGUI:
 
         if self.require_confirmation_var.get():
             self.pending_cleanup_request = {
+                "mode": "cleanup",
                 "chat_id": chat_id,
                 "batch_size": batch_size,
                 "pause_seconds": pause_seconds,
@@ -444,11 +584,42 @@ class TelegramCleanupGUI:
 
         self._launch_cleanup_worker(chat_id, batch_size, pause_seconds)
 
+    def _delete_indexed_only(self) -> None:
+        chat_id = self._require_chat_id()
+        if not chat_id:
+            return
+        batch_size, pause_seconds = self._get_batch_settings()
+        if batch_size is None or pause_seconds is None:
+            return
+
+        if self.require_confirmation_var.get():
+            self.pending_cleanup_request = {
+                "mode": "delete_indexed_only",
+                "chat_id": chat_id,
+                "batch_size": batch_size,
+                "pause_seconds": pause_seconds,
+            }
+            self._launch_worker("prepare_cleanup", self.core.get_chat_overview, chat_id)
+            return
+
+        self._launch_delete_indexed_only_worker(chat_id, batch_size, pause_seconds)
+
     def _launch_cleanup_worker(self, chat_id: str, batch_size: int, pause_seconds: float) -> None:
         control = RunControl()
         self._launch_worker(
             "cleanup",
             self.core.start_cleanup,
+            chat_id,
+            batch_size,
+            pause_seconds,
+            control=control,
+        )
+
+    def _launch_delete_indexed_only_worker(self, chat_id: str, batch_size: int, pause_seconds: float) -> None:
+        control = RunControl()
+        self._launch_worker(
+            "delete_indexed_only",
+            self.core.delete_indexed_only,
             chat_id,
             batch_size,
             pause_seconds,
@@ -643,6 +814,9 @@ class TelegramCleanupGUI:
             self._set_auth_status_text(status)
             account = result.get("account")
             self.authorized_as_var.set(self._format_account_label(account))
+            info_message = result.get("info_message")
+            if info_message:
+                self._append_log(info_message)
             if action == "logout":
                 self.login_code_var.set("")
                 self.password_var.set("")
@@ -652,7 +826,14 @@ class TelegramCleanupGUI:
             self._handle_prepare_cleanup_result(result)
             return
 
-        if action in {"index", "cleanup", "retry_failed"}:
+        if action == "list_groups":
+            self.chat_selector_dialogs = list(result or [])
+            self.chat_selector_filtered_dialogs = list(self.chat_selector_dialogs)
+            self._append_log(f"Loaded {len(self.chat_selector_dialogs)} dialogs for chat selection.")
+            self._open_chat_selector()
+            return
+
+        if action in {"index", "cleanup", "delete_indexed_only", "retry_failed"}:
             chat_id = result.get("chat_id")
             title = result.get("title")
             counts = result.get("counts", {})
@@ -695,11 +876,154 @@ class TelegramCleanupGUI:
             self._append_log("Cleanup cancelled by user before deletion.")
             return
 
-        self._launch_cleanup_worker(
-            request["chat_id"],
-            request["batch_size"],
-            request["pause_seconds"],
+        if request.get("mode") == "delete_indexed_only":
+            self._launch_delete_indexed_only_worker(
+                request["chat_id"],
+                request["batch_size"],
+                request["pause_seconds"],
+            )
+        else:
+            self._launch_cleanup_worker(
+                request["chat_id"],
+                request["batch_size"],
+                request["pause_seconds"],
+            )
+
+    def _open_chat_selector(self) -> None:
+        if self.chat_selector_window and self.chat_selector_window.winfo_exists():
+            self.chat_selector_window.deiconify()
+            self.chat_selector_window.lift()
+            self._populate_chat_selector_tree()
+            return
+
+        window = tk.Toplevel(self.root)
+        self.chat_selector_window = window
+        window.title(self.translator.gettext("select_chat"))
+        window.geometry("900x520")
+        window.minsize(760, 420)
+        window.transient(self.root)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+        window.protocol("WM_DELETE_WINDOW", self._close_chat_selector)
+
+        top_frame = ttk.Frame(window)
+        top_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+        top_frame.columnconfigure(1, weight=1)
+
+        self.chat_selector_search_label = ttk.Label(top_frame)
+        self.chat_selector_search_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self._register_widget_text(self.chat_selector_search_label, "search_chats")
+
+        self.chat_selector_search_entry = ttk.Entry(top_frame, textvariable=self.chat_selector_search_var)
+        self.chat_selector_search_entry.grid(row=0, column=1, sticky="ew")
+        self.chat_selector_search_entry.bind("<KeyRelease>", lambda _event: self._filter_chat_selector())
+
+        self.chat_selector_refresh_button = ttk.Button(top_frame, command=self._refresh_chat_list)
+        self.chat_selector_refresh_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self._register_widget_text(self.chat_selector_refresh_button, "refresh_chat_list")
+
+        tree_frame = ttk.Frame(window)
+        tree_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=8)
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        self.chat_selector_tree = ttk.Treeview(
+            tree_frame,
+            columns=("title", "id", "username", "type"),
+            show="headings",
+            style="ChatSelector.Treeview",
         )
+        self.chat_selector_tree.heading("title", text=self.translator.gettext("chat_title_column"))
+        self.chat_selector_tree.heading("id", text=self.translator.gettext("chat_id_column"))
+        self.chat_selector_tree.heading("username", text=self.translator.gettext("chat_username_column"))
+        self.chat_selector_tree.heading("type", text=self.translator.gettext("chat_type_column"))
+        self.chat_selector_tree.column("title", width=330, anchor="w")
+        self.chat_selector_tree.column("id", width=170, anchor="w")
+        self.chat_selector_tree.column("username", width=170, anchor="w")
+        self.chat_selector_tree.column("type", width=120, anchor="w")
+        self.chat_selector_tree.grid(row=0, column=0, sticky="nsew")
+        self.chat_selector_tree.bind("<Double-1>", lambda _event: self._use_selected_chat())
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.chat_selector_tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.chat_selector_tree.configure(yscrollcommand=scrollbar.set)
+
+        bottom_frame = ttk.Frame(window)
+        bottom_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(8, 12))
+        bottom_frame.columnconfigure(0, weight=1)
+
+        self.chat_selector_use_button = ttk.Button(bottom_frame, command=self._use_selected_chat)
+        self.chat_selector_use_button.grid(row=0, column=1, sticky="e")
+        self._register_widget_text(self.chat_selector_use_button, "use_selected_chat")
+
+        self._apply_theme()
+        self._refresh_translations()
+        self._populate_chat_selector_tree()
+        self.chat_selector_search_entry.focus_set()
+
+    def _close_chat_selector(self) -> None:
+        if self.chat_selector_window and self.chat_selector_window.winfo_exists():
+            self.chat_selector_window.destroy()
+        self.chat_selector_window = None
+
+    def _filter_chat_selector(self) -> None:
+        query = self.chat_selector_search_var.get().strip().lower()
+        if not query:
+            self.chat_selector_filtered_dialogs = list(self.chat_selector_dialogs)
+        else:
+            self.chat_selector_filtered_dialogs = [
+                dialog
+                for dialog in self.chat_selector_dialogs
+                if query in str(dialog.get("title", "")).lower()
+                or query in str(dialog.get("id", "")).lower()
+                or query in str(dialog.get("username", "")).lower()
+                or query in str(dialog.get("type", "")).lower()
+            ]
+        self._populate_chat_selector_tree()
+
+    def _populate_chat_selector_tree(self) -> None:
+        if not self.chat_selector_window or not self.chat_selector_window.winfo_exists():
+            return
+        for item_id in self.chat_selector_tree.get_children():
+            self.chat_selector_tree.delete(item_id)
+
+        for index, dialog in enumerate(self.chat_selector_filtered_dialogs):
+            self.chat_selector_tree.insert(
+                "",
+                "end",
+                iid=f"dialog-{index}",
+                values=(
+                    str(dialog.get("title") or ""),
+                    str(dialog.get("id") or ""),
+                    str(dialog.get("username") or ""),
+                    str(dialog.get("type") or ""),
+                ),
+            )
+
+        children = self.chat_selector_tree.get_children()
+        if children:
+            self.chat_selector_tree.selection_set(children[0])
+            self.chat_selector_tree.focus(children[0])
+
+    def _use_selected_chat(self) -> None:
+        if not self.chat_selector_window or not self.chat_selector_window.winfo_exists():
+            return
+
+        selection = self.chat_selector_tree.selection()
+        if not selection:
+            messagebox.showwarning(
+                self.translator.gettext("warning_title"),
+                self.translator.gettext("no_chat_selected"),
+            )
+            return
+
+        values = self.chat_selector_tree.item(selection[0], "values")
+        title = str(values[0])
+        chat_id = str(values[1])
+        self.chat_id_var.set(chat_id)
+        self._load_local_chat_state()
+        self._append_log(self.translator.gettext("chat_selected_message", title=title, chat_id=chat_id))
+        self._close_chat_selector()
 
     def _render_progress(self, snapshot: dict[str, Any]) -> None:
         phase = snapshot.get("phase") or self.translator.gettext("progress_idle")
@@ -848,6 +1172,7 @@ class TelegramCleanupGUI:
         control_available = self.current_control is not None and self.active_action in {
             "index",
             "cleanup",
+            "delete_indexed_only",
             "retry_failed",
         }
 
@@ -860,6 +1185,7 @@ class TelegramCleanupGUI:
             self.list_groups_button,
             self.index_only_button,
             self.start_cleanup_button,
+            self.delete_indexed_only_button,
             self.retry_failed_button,
             self.delete_local_db_button,
             self.browse_db_button,

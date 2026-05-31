@@ -23,6 +23,14 @@ def build_parser() -> argparse.ArgumentParser:
     delete_parser.add_argument("--batch-size", type=int, default=100, help="Delete batch size")
     delete_parser.add_argument("--pause", type=float, default=2.0, help="Pause between batches in seconds")
 
+    delete_indexed_parser = subparsers.add_parser(
+        "delete-indexed",
+        help="Delete already indexed pending messages without a new indexing pass",
+    )
+    delete_indexed_parser.add_argument("--chat-id", required=True, help="Telegram chat ID")
+    delete_indexed_parser.add_argument("--batch-size", type=int, default=100, help="Delete batch size")
+    delete_indexed_parser.add_argument("--pause", type=float, default=2.0, help="Pause between batches in seconds")
+
     retry_parser = subparsers.add_parser("retry-failed", help="Retry failed deletions for one chat")
     retry_parser.add_argument("--chat-id", required=True, help="Telegram chat ID")
     retry_parser.add_argument("--batch-size", type=int, default=100, help="Delete batch size")
@@ -53,6 +61,15 @@ def main() -> int:
 
         if args.command == "delete":
             result = core.start_cleanup(
+                chat_input=args.chat_id,
+                batch_size=args.batch_size,
+                pause_seconds=args.pause,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "delete-indexed":
+            result = core.delete_indexed_only(
                 chat_input=args.chat_id,
                 batch_size=args.batch_size,
                 pause_seconds=args.pause,

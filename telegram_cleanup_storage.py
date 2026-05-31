@@ -4,6 +4,8 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable
 
+UNSET = object()
+
 
 def utc_now_iso() -> str:
     from datetime import datetime, timezone
@@ -34,6 +36,9 @@ class ProgressStorage:
                     username TEXT,
                     chat_type TEXT,
                     indexed_at TEXT,
+                    index_complete INTEGER DEFAULT 0,
+                    newest_indexed_message_id INTEGER,
+                    next_oldest_message_id INTEGER,
                     status TEXT,
                     updated_at TEXT
                 );
@@ -82,6 +87,16 @@ class ProgressStorage:
                 ON runs (chat_id, started_at DESC);
                 """
             )
+            self._ensure_schema_migrations(conn)
+
+    def _ensure_schema_migrations(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(chats)").fetchall()}
+        if "index_complete" not in columns:
+            conn.execute("ALTER TABLE chats ADD COLUMN index_complete INTEGER DEFAULT 0")
+        if "newest_indexed_message_id" not in columns:
+            conn.execute("ALTER TABLE chats ADD COLUMN newest_indexed_message_id INTEGER")
+        if "next_oldest_message_id" not in columns:
+            conn.execute("ALTER TABLE chats ADD COLUMN next_oldest_message_id INTEGER")
 
     def upsert_chat(
         self,
@@ -95,8 +110,19 @@ class ProgressStorage:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO chats (chat_id, title, username, chat_type, indexed_at, status, updated_at)
-                VALUES (?, ?, ?, ?, NULL, ?, ?)
+                INSERT INTO chats (
+                    chat_id,
+                    title,
+                    username,
+                    chat_type,
+                    indexed_at,
+                    index_complete,
+                    newest_indexed_message_id,
+                    next_oldest_message_id,
+                    status,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, NULL, 0, NULL, NULL, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     title = excluded.title,
                     username = excluded.username,
@@ -128,6 +154,70 @@ class ProgressStorage:
                     """,
                     (status, now, chat_id),
                 )
+
+    def get_chat_index_state(self, chat_id: str) -> dict[str, int | bool | None]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT index_complete, newest_indexed_message_id, next_oldest_message_id
+                FROM chats
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+        if not row:
+            return {
+                "index_complete": False,
+                "newest_indexed_message_id": None,
+                "next_oldest_message_id": None,
+            }
+        return {
+            "index_complete": bool(row["index_complete"]),
+            "newest_indexed_message_id": row["newest_indexed_message_id"],
+            "next_oldest_message_id": row["next_oldest_message_id"],
+        }
+
+    def update_chat_index_state(
+        self,
+        chat_id: str,
+        *,
+        newest_indexed_message_id: int | None | object = UNSET,
+        next_oldest_message_id: int | None | object = UNSET,
+        index_complete: bool | None = None,
+    ) -> None:
+        current = self.get_chat_index_state(chat_id)
+        next_state = {
+            "newest_indexed_message_id": (
+                newest_indexed_message_id
+                if newest_indexed_message_id is not UNSET
+                else current["newest_indexed_message_id"]
+            ),
+            "next_oldest_message_id": (
+                next_oldest_message_id
+                if next_oldest_message_id is not UNSET
+                else current["next_oldest_message_id"]
+            ),
+            "index_complete": current["index_complete"] if index_complete is None else index_complete,
+        }
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE chats
+                SET newest_indexed_message_id = ?,
+                    next_oldest_message_id = ?,
+                    index_complete = ?,
+                    updated_at = ?
+                WHERE chat_id = ?
+                """,
+                (
+                    next_state["newest_indexed_message_id"],
+                    next_state["next_oldest_message_id"],
+                    1 if next_state["index_complete"] else 0,
+                    now,
+                    chat_id,
+                ),
+            )
 
     def create_run(self, chat_id: str, phase: str, status: str = "running") -> int:
         now = utc_now_iso()
@@ -214,7 +304,16 @@ class ProgressStorage:
 
             chat_row = conn.execute(
                 """
-                SELECT title, username, chat_type, indexed_at, status, updated_at
+                SELECT
+                    title,
+                    username,
+                    chat_type,
+                    indexed_at,
+                    index_complete,
+                    newest_indexed_message_id,
+                    next_oldest_message_id,
+                    status,
+                    updated_at
                 FROM chats
                 WHERE chat_id = ?
                 """,
@@ -236,6 +335,9 @@ class ProgressStorage:
             "username": None,
             "chat_type": None,
             "indexed_at": None,
+            "index_complete": False,
+            "newest_indexed_message_id": None,
+            "next_oldest_message_id": None,
             "status": None,
             "chat_updated_at": None,
         }
@@ -246,6 +348,9 @@ class ProgressStorage:
                     "username": chat_row["username"],
                     "chat_type": chat_row["chat_type"],
                     "indexed_at": chat_row["indexed_at"],
+                    "index_complete": bool(chat_row["index_complete"]),
+                    "newest_indexed_message_id": chat_row["newest_indexed_message_id"],
+                    "next_oldest_message_id": chat_row["next_oldest_message_id"],
                     "status": chat_row["status"],
                     "chat_updated_at": chat_row["updated_at"],
                 }
@@ -335,6 +440,18 @@ class ProgressStorage:
     def clear_failed_batch_records(self, chat_id: str) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM failed_batches WHERE chat_id = ?", (chat_id,))
+
+    def reset_failed_to_pending(self, chat_id: str) -> None:
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE messages
+                SET status = 'pending', last_error = NULL, updated_at = ?
+                WHERE chat_id = ? AND status = 'failed'
+                """,
+                (now, chat_id),
+            )
 
     def get_recent_run(self, chat_id: str) -> dict[str, str | int | None] | None:
         with self._connect() as conn:

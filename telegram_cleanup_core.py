@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import sys
 import threading
 import time
@@ -20,6 +21,7 @@ except ModuleNotFoundError:
 
 try:
     from telethon import TelegramClient, errors, utils
+    from telethon.tl import types
     TELETHON_IMPORT_ERROR: ModuleNotFoundError | None = None
 except ModuleNotFoundError as exc:
     TELETHON_IMPORT_ERROR = exc
@@ -35,6 +37,7 @@ except ModuleNotFoundError as exc:
 
     errors = _MissingErrors()
     utils = _MissingUtils()
+    types = Any  # type: ignore[assignment]
 
 from telegram_cleanup_logging import format_exception_message, setup_app_logger
 from telegram_cleanup_storage import ProgressStorage
@@ -44,6 +47,7 @@ APP_NAME = "Telegram Message Cleaner"
 CONFIG_FILE_NAME = "telegram_message_cleaner_config.json"
 SESSION_FILE_STEM = "telegram_message_cleaner"
 DB_FILE_NAME = "telegram_message_cleaner.sqlite3"
+DEV_DATA_DIR_NAME = "TelegramMessageCleaner"
 SUPPORTED_LANGUAGES = ("en", "ru")
 SUPPORTED_THEMES = ("Light", "Dark")
 
@@ -54,6 +58,21 @@ def get_app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def get_runtime_data_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return get_app_dir()
+
+    local_app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if local_app_data:
+        data_dir = Path(local_app_data) / DEV_DATA_DIR_NAME
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
+
+    fallback = get_app_dir() / ".local_data"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
 def utc_now_iso() -> str:
@@ -123,10 +142,11 @@ class RunControl:
 
 
 class ConfigStore:
-    def __init__(self, app_dir: Path) -> None:
-        self.app_dir = app_dir
-        self.config_path = app_dir / CONFIG_FILE_NAME
-        load_dotenv(app_dir / ".env")
+    def __init__(self, config_dir: Path, env_fallback_dir: Path) -> None:
+        self.config_dir = config_dir
+        self.env_fallback_dir = env_fallback_dir
+        self.config_path = config_dir / CONFIG_FILE_NAME
+        load_dotenv(env_fallback_dir / ".env")
 
     def default_config(self) -> dict[str, Any]:
         return {
@@ -181,14 +201,17 @@ class TelegramCleanupCore:
         db_file_override: str | None = None,
     ) -> None:
         self.app_dir = app_dir or get_app_dir()
+        self.data_dir = get_runtime_data_dir()
+        self._migrate_legacy_runtime_files()
         self.event_callback = event_callback
-        self.config_store = ConfigStore(self.app_dir)
+        self.config_store = ConfigStore(self.data_dir, self.app_dir)
         self.config = self.config_store.load()
-        self.logger, self.log_dir = setup_app_logger(self.app_dir)
+        self.logger, self.log_dir = setup_app_logger(self.data_dir)
         self._db_file_override = db_file_override
         self.storage = ProgressStorage(self.get_database_path())
         self._pending_phone_number: str | None = None
         self._pending_phone_code_hash: str | None = None
+        self._ensure_git_protection_for_local_files()
 
     def get_config(self) -> dict[str, Any]:
         return dict(self.config)
@@ -196,6 +219,7 @@ class TelegramCleanupCore:
     def reload_config(self) -> dict[str, Any]:
         self.config = self.config_store.load()
         self.storage = ProgressStorage(self.get_database_path())
+        self._ensure_git_protection_for_local_files()
         return self.get_config()
 
     def save_config(self, updates: dict[str, Any]) -> dict[str, Any]:
@@ -204,6 +228,7 @@ class TelegramCleanupCore:
         self.config_store.save(data)
         self.config = data
         self.storage = ProgressStorage(self.get_database_path())
+        self._ensure_git_protection_for_local_files()
         return self.get_config()
 
     def save_api_credentials(self, api_id: str, api_hash: str, phone_number: str) -> dict[str, Any]:
@@ -246,14 +271,14 @@ class TelegramCleanupCore:
         db_value = self._db_file_override or self.config.get("db_file") or DB_FILE_NAME
         candidate = Path(str(db_value))
         if not candidate.is_absolute():
-            candidate = self.app_dir / candidate
+            candidate = self.data_dir / candidate
         return candidate.resolve()
 
     def get_config_path(self) -> Path:
         return self.config_store.config_path.resolve()
 
     def get_session_file_path(self) -> Path:
-        return (self.app_dir / f"{SESSION_FILE_STEM}.session").resolve()
+        return (self.data_dir / f"{SESSION_FILE_STEM}.session").resolve()
 
     def delete_local_progress_database(self) -> None:
         db_path = self.get_database_path()
@@ -298,6 +323,22 @@ class TelegramCleanupCore:
     ) -> dict[str, Any]:
         return asyncio.run(
             self._start_cleanup_async(
+                chat_input=chat_input,
+                batch_size=batch_size,
+                pause_seconds=pause_seconds,
+                control=control or RunControl(),
+            )
+        )
+
+    def delete_indexed_only(
+        self,
+        chat_input: str,
+        batch_size: int = 100,
+        pause_seconds: float = 2.0,
+        control: RunControl | None = None,
+    ) -> dict[str, Any]:
+        return asyncio.run(
+            self._delete_indexed_only_async(
                 chat_input=chat_input,
                 batch_size=batch_size,
                 pause_seconds=pause_seconds,
@@ -370,12 +411,117 @@ class TelegramCleanupCore:
         self._ensure_telethon_available()
         api_id, api_hash = self._require_api_credentials()
         session_base = (self.app_dir / SESSION_FILE_STEM).resolve()
+        if not getattr(sys, "frozen", False):
+            session_base = (self.data_dir / SESSION_FILE_STEM).resolve()
         client = TelegramClient(str(session_base), api_id, api_hash)
         await client.connect()
         try:
             yield client
         finally:
             await client.disconnect()
+
+    def _ensure_git_protection_for_local_files(self) -> None:
+        repo_git_dir = self.app_dir / ".git"
+        if not repo_git_dir.exists():
+            return
+
+        exclude_path = repo_git_dir / "info" / "exclude"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_lines: set[str] = set()
+        if exclude_path.exists():
+            existing_lines = {line.strip() for line in exclude_path.read_text(encoding="utf-8").splitlines()}
+
+        protected_paths = [
+            self.get_config_path(),
+            self.get_session_file_path(),
+            self.get_session_file_path().with_name(f"{self.get_session_file_path().name}-journal"),
+            self.get_database_path(),
+            self.get_database_path().with_suffix(f"{self.get_database_path().suffix}-wal"),
+            self.get_database_path().with_suffix(f"{self.get_database_path().suffix}-shm"),
+            self.log_dir,
+        ]
+
+        new_lines: list[str] = []
+        for protected_path in protected_paths:
+            try:
+                relative_path = protected_path.resolve().relative_to(self.app_dir.resolve())
+            except ValueError:
+                continue
+            git_pattern = relative_path.as_posix()
+            if protected_path.is_dir() and not git_pattern.endswith("/"):
+                git_pattern += "/"
+            if git_pattern not in existing_lines:
+                new_lines.append(git_pattern)
+
+        if new_lines:
+            prefix = "\n# Telegram Message Cleaner local runtime files\n"
+            with exclude_path.open("a", encoding="utf-8") as file:
+                file.write(prefix)
+                for line in new_lines:
+                    file.write(f"{line}\n")
+
+    def _migrate_legacy_runtime_files(self) -> None:
+        if getattr(sys, "frozen", False):
+            return
+        if self.app_dir.resolve() == self.data_dir.resolve():
+            return
+
+        legacy_paths = [
+            self.app_dir / CONFIG_FILE_NAME,
+            self.app_dir / f"{SESSION_FILE_STEM}.session",
+            self.app_dir / f"{SESSION_FILE_STEM}.session-journal",
+            self.app_dir / DB_FILE_NAME,
+            self.app_dir / f"{DB_FILE_NAME}-wal",
+            self.app_dir / f"{DB_FILE_NAME}-shm",
+            self.app_dir / "TelegramMessageCleaner_Logs",
+        ]
+
+        for source_path in legacy_paths:
+            if not source_path.exists():
+                continue
+
+            target_path = self.data_dir / source_path.name
+            if source_path.is_dir():
+                self._move_legacy_directory(source_path, target_path)
+            else:
+                self._move_legacy_file(source_path, target_path)
+
+    def _move_legacy_file(self, source_path: Path, target_path: Path) -> None:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if not target_path.exists():
+            shutil.move(str(source_path), str(target_path))
+            return
+
+        if source_path.stat().st_size == 0:
+            source_path.unlink()
+            return
+
+        backup_target = self._make_non_conflicting_target(target_path)
+        shutil.move(str(source_path), str(backup_target))
+
+    def _move_legacy_directory(self, source_path: Path, target_path: Path) -> None:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if not target_path.exists():
+            shutil.move(str(source_path), str(target_path))
+            return
+
+        for child in source_path.iterdir():
+            child_target = target_path / child.name
+            if child.is_dir():
+                self._move_legacy_directory(child, child_target)
+            else:
+                self._move_legacy_file(child, child_target)
+
+        if not any(source_path.iterdir()):
+            source_path.rmdir()
+
+    def _make_non_conflicting_target(self, target_path: Path) -> Path:
+        counter = 1
+        while True:
+            candidate = target_path.with_name(f"{target_path.stem}_legacy_{counter}{target_path.suffix}")
+            if not candidate.exists():
+                return candidate
+            counter += 1
 
     async def _get_auth_status_async(self) -> dict[str, Any]:
         try:
@@ -394,6 +540,56 @@ class TelegramCleanupCore:
             self._log("error", "Failed to fetch auth status.", error=format_exception_message(exc))
             return {"status": "auth error", "account": None, "error": format_exception_message(exc)}
 
+    def _describe_code_delivery_type(self, sent_code_type: Any) -> str:
+        if isinstance(sent_code_type, types.auth.SentCodeTypeApp):
+            return "Telegram app"
+        if isinstance(sent_code_type, types.auth.SentCodeTypeSms):
+            return "SMS"
+        if isinstance(sent_code_type, types.auth.SentCodeTypeFirebaseSms):
+            return "Firebase SMS / device verification"
+        if isinstance(sent_code_type, types.auth.SentCodeTypeCall):
+            return "phone call"
+        if isinstance(sent_code_type, types.auth.SentCodeTypeFlashCall):
+            return "flash call"
+        if isinstance(sent_code_type, types.auth.SentCodeTypeMissedCall):
+            return "missed call"
+        if isinstance(sent_code_type, types.auth.SentCodeTypeFragmentSms):
+            return "Fragment SMS"
+        if isinstance(sent_code_type, types.auth.SentCodeTypeEmailCode):
+            return "email"
+        if isinstance(sent_code_type, types.auth.SentCodeTypeSetUpEmailRequired):
+            return "email setup required"
+        if isinstance(sent_code_type, types.auth.SentCodeTypeSmsPhrase):
+            return "SMS phrase"
+        if isinstance(sent_code_type, types.auth.SentCodeTypeSmsWord):
+            return "SMS word"
+        return sent_code_type.__class__.__name__
+
+    def _build_code_delivery_hint(self, result: Any) -> str:
+        delivery = self._describe_code_delivery_type(getattr(result, "type", None))
+        timeout = getattr(result, "timeout", None)
+        next_type = getattr(result, "next_type", None)
+        next_delivery = self._describe_code_delivery_type(next_type) if next_type is not None else None
+
+        if delivery == "Telegram app":
+            message = (
+                "Telegram sent the login code to your Telegram app on an already signed-in device. "
+                "This attempt was not sent by SMS."
+            )
+        elif delivery == "Firebase SMS / device verification":
+            message = (
+                "Telegram requested device-based verification / Firebase SMS. "
+                "Check the phone linked to this account."
+            )
+        else:
+            message = f"Telegram requested delivery by {delivery}."
+
+        if next_delivery:
+            message += f" If needed, the next fallback may be {next_delivery}."
+        if timeout not in (None, 0):
+            message += f" Approximate wait before retry: {timeout} sec."
+        return message
+
     async def _send_code_async(self, phone_number: str | None) -> dict[str, Any]:
         phone = (phone_number or self.config.get("phone_number") or "").strip()
         if not phone:
@@ -402,16 +598,31 @@ class TelegramCleanupCore:
         self.save_config({"phone_number": phone})
         async with self._connected_client() as client:
             try:
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    self._log("info", "Telegram account is already authorized on this device session.")
+                    return {
+                        "status": "authorized",
+                        "account": self._serialize_account(me),
+                        "info_message": "This app session is already authorized. You do not need a new login code.",
+                    }
                 result = await client.send_code_request(phone)
             except errors.ApiIdInvalidError as exc:
                 raise ValueError("Invalid API ID or API Hash.") from exc
             except errors.PhoneNumberInvalidError as exc:
                 raise ValueError("Invalid phone number.") from exc
+            except errors.FloodWaitError as exc:
+                raise ValueError(f"Telegram asked to wait {exc.seconds} sec before requesting another code.") from exc
+            except errors.PhoneNumberFloodError as exc:
+                raise ValueError("Too many code requests for this phone number. Please wait and try again later.") from exc
+            except errors.PhoneNumberBannedError as exc:
+                raise ValueError("This phone number is banned by Telegram.") from exc
 
         self._pending_phone_number = phone
         self._pending_phone_code_hash = result.phone_code_hash
-        self._log("info", "Telegram login code sent.")
-        return {"status": "code sent"}
+        info_message = self._build_code_delivery_hint(result)
+        self._log("info", "Telegram login code requested.", delivery=info_message)
+        return {"status": "code sent", "info_message": info_message}
 
     async def _sign_in_async(self, login_code: str, phone_number: str | None) -> dict[str, Any]:
         phone = (phone_number or self._pending_phone_number or self.config.get("phone_number") or "").strip()
@@ -527,6 +738,7 @@ class TelegramCleanupCore:
                 "username": username,
                 "chat_type": chat_type,
                 "counts": state,
+                "index_state": self.storage.get_chat_index_state(chat_id),
                 "recent_run": recent_run,
             }
             self._emit("chat_overview", overview=overview)
@@ -545,12 +757,20 @@ class TelegramCleanupCore:
             chat_type = self._detect_chat_type(entity)
             self.storage.upsert_chat(chat_id, title, username, chat_type, "indexing")
             run_id = self.storage.create_run(chat_id, "index")
-            self._log("info", "Indexing started.", chat_id=chat_id, title=title)
+            index_state = self.storage.get_chat_index_state(chat_id)
+            self._log(
+                "info",
+                "Indexing started.",
+                chat_id=chat_id,
+                title=title,
+                resume_from_message_id=index_state.get("next_oldest_message_id"),
+                newest_indexed_message_id=index_state.get("newest_indexed_message_id"),
+            )
             try:
                 indexed_count = await self._run_indexing(client, me.id, entity, chat_id, title, control, run_id)
                 final_counts = self._emit_progress(chat_id, title, "indexing-complete", run_id=run_id)
                 final_status = control.terminal_status() or "completed"
-                self.storage.update_chat_status(chat_id, final_status, indexed=True)
+                self.storage.update_chat_status(chat_id, final_status, indexed=bool(final_counts.get("index_complete")))
                 self.storage.finish_run(run_id, final_status, final_counts)
                 self._log("info", "Indexing finished.", chat_id=chat_id, title=title, indexed=indexed_count)
                 return {
@@ -590,7 +810,7 @@ class TelegramCleanupCore:
                 terminal = control.terminal_status()
                 if terminal:
                     counts = self._emit_progress(chat_id, title, terminal, run_id=run_id)
-                    self.storage.update_chat_status(chat_id, terminal, indexed=True)
+                    self.storage.update_chat_status(chat_id, terminal, indexed=bool(counts.get("index_complete")))
                     self.storage.finish_run(run_id, terminal, counts)
                     self._log("info", f"Cleanup {terminal} after indexing.", chat_id=chat_id, title=title)
                     return {"status": terminal, "chat_id": chat_id, "title": title, "counts": counts}
@@ -625,6 +845,71 @@ class TelegramCleanupCore:
                 self.storage.finish_run(run_id, "error", error_counts)
                 raise
 
+    async def _delete_indexed_only_async(
+        self,
+        chat_input: str,
+        batch_size: int,
+        pause_seconds: float,
+        control: RunControl,
+    ) -> dict[str, Any]:
+        control.reset()
+        async with self._connected_client() as client:
+            if not await client.is_user_authorized():
+                raise PermissionError("Authorize the Telegram account first.")
+
+            entity = await self._resolve_chat_entity(client, chat_input)
+            chat_id = str(utils.get_peer_id(entity))
+            title = self._get_entity_title(entity)
+            username = getattr(entity, "username", None)
+            chat_type = self._detect_chat_type(entity)
+            self.storage.upsert_chat(chat_id, title, username, chat_type, "deleting-indexed-only")
+            run_id = self.storage.create_run(chat_id, "delete_indexed_only")
+            counts_before = self.storage.get_status_counts(chat_id)
+            self._log(
+                "info",
+                "Deleting already indexed pending messages without a new indexing pass.",
+                chat_id=chat_id,
+                title=title,
+                pending=counts_before.get("pending", 0),
+                index_complete=counts_before.get("index_complete"),
+            )
+            try:
+                counts = await self._run_delete_loop(
+                    client=client,
+                    entity=entity,
+                    chat_id=chat_id,
+                    title=title,
+                    source_status="pending",
+                    batch_size=batch_size,
+                    pause_seconds=pause_seconds,
+                    control=control,
+                    run_id=run_id,
+                )
+                terminal = control.terminal_status()
+                if terminal:
+                    self.storage.update_chat_status(chat_id, terminal, indexed=bool(counts.get("index_complete")))
+                    self.storage.finish_run(run_id, terminal, counts)
+                    self._log("info", f"Delete indexed only {terminal}.", chat_id=chat_id, title=title)
+                    return {"status": terminal, "chat_id": chat_id, "title": title, "counts": counts}
+
+                index_complete = bool(counts.get("index_complete"))
+                if counts["pending"] == 0 and counts["failed"] > 0:
+                    final_status = "completed_with_failures"
+                elif counts["pending"] == 0 and not index_complete:
+                    final_status = "partial_deleted_waiting_for_more_indexing"
+                else:
+                    final_status = "completed"
+
+                self.storage.update_chat_status(chat_id, final_status, indexed=index_complete)
+                self.storage.finish_run(run_id, final_status, counts)
+                self._log("info", "Delete indexed only finished.", chat_id=chat_id, title=title, status=final_status)
+                return {"status": final_status, "chat_id": chat_id, "title": title, "counts": counts}
+            except Exception:
+                error_counts = self.storage.get_status_counts(chat_id)
+                self.storage.update_chat_status(chat_id, "error")
+                self.storage.finish_run(run_id, "error", error_counts)
+                raise
+
     async def _retry_failed_async(
         self,
         chat_input: str,
@@ -642,6 +927,7 @@ class TelegramCleanupCore:
             title = self._get_entity_title(entity)
             run_id = self.storage.create_run(chat_id, "retry_failed")
             self.storage.update_chat_status(chat_id, "retrying-failed", indexed=True)
+            self.storage.reset_failed_to_pending(chat_id)
             self._log("info", "Retry failed started.", chat_id=chat_id, title=title)
             try:
                 counts = await self._run_delete_loop(
@@ -649,7 +935,7 @@ class TelegramCleanupCore:
                     entity=entity,
                     chat_id=chat_id,
                     title=title,
-                    source_status="failed",
+                    source_status="pending",
                     batch_size=batch_size,
                     pause_seconds=pause_seconds,
                     control=control,
@@ -684,33 +970,146 @@ class TelegramCleanupCore:
         run_id: int,
     ) -> int:
         self._emit_progress(chat_id, title, "indexing")
+        state = self.storage.get_chat_index_state(chat_id)
+        indexed_total = 0
+
+        newest_message_id = self._as_int_or_none(state.get("newest_indexed_message_id"))
+        resume_older_from = self._as_int_or_none(state.get("next_oldest_message_id"))
+        index_complete = bool(state.get("index_complete"))
+
+        if newest_message_id is not None:
+            indexed_total += await self._index_message_stream(
+                client=client,
+                entity=entity,
+                chat_id=chat_id,
+                title=title,
+                control=control,
+                run_id=run_id,
+                from_user=my_user_id,
+                min_id=newest_message_id,
+                update_newest=True,
+                update_resume_cursor=False,
+                phase_label="indexing-newer",
+            )
+            newest_message_id = self._as_int_or_none(self.storage.get_chat_index_state(chat_id).get("newest_indexed_message_id"))
+
+        if control.terminal_status():
+            counts = self._emit_progress(chat_id, title, "indexing-interrupted")
+            self.storage.update_chat_status(chat_id, "indexing-interrupted", indexed=False)
+            return indexed_total
+
+        if not index_complete:
+            indexed_total += await self._index_message_stream(
+                client=client,
+                entity=entity,
+                chat_id=chat_id,
+                title=title,
+                control=control,
+                run_id=run_id,
+                from_user=my_user_id,
+                max_id=resume_older_from,
+                update_newest=newest_message_id is None,
+                update_resume_cursor=True,
+                phase_label="indexing-history",
+            )
+
+        counts = self._emit_progress(chat_id, title, "indexing")
+        current_state = self.storage.get_chat_index_state(chat_id)
+        if control.terminal_status():
+            self.storage.update_chat_status(chat_id, "indexing-interrupted", indexed=False)
+            self._log(
+                "info",
+                "Indexing interrupted and saved for resume.",
+                chat_id=chat_id,
+                title=title,
+                resume_from_message_id=current_state.get("next_oldest_message_id"),
+            )
+            return indexed_total
+
+        if bool(current_state.get("index_complete")):
+            self.storage.update_chat_status(chat_id, "indexed", indexed=True)
+            self._log("info", "Indexing phase complete.", chat_id=chat_id, title=title, indexed=counts["indexed"])
+        else:
+            self.storage.update_chat_status(chat_id, "indexing-partial", indexed=False)
+            self._log(
+                "warning",
+                "Indexing stopped before the full history was covered, but progress was saved.",
+                chat_id=chat_id,
+                title=title,
+                resume_from_message_id=current_state.get("next_oldest_message_id"),
+            )
+        return indexed_total
+
+    async def _index_message_stream(
+        self,
+        client: TelegramClient,
+        entity: Any,
+        chat_id: str,
+        title: str,
+        control: RunControl,
+        run_id: int,
+        from_user: int,
+        *,
+        min_id: int | None = None,
+        max_id: int | None = None,
+        update_newest: bool,
+        update_resume_cursor: bool,
+        phase_label: str,
+    ) -> int:
         found = 0
         batch: list[tuple[int, str | None]] = []
-        async for message in client.iter_messages(entity):
+        current_newest = self._as_int_or_none(self.storage.get_chat_index_state(chat_id).get("newest_indexed_message_id"))
+        current_oldest: int | None = None
+
+        iter_kwargs: dict[str, Any] = {"from_user": from_user}
+        if min_id is not None:
+            iter_kwargs["min_id"] = min_id
+        if max_id is not None:
+            iter_kwargs["max_id"] = max_id
+
+        async for message in client.iter_messages(entity, **iter_kwargs):
             if control.terminal_status():
                 break
-            sender_id = getattr(message, "sender_id", None)
-            if sender_id != my_user_id:
-                continue
 
+            message_id = int(message.id)
             message_date = message.date.isoformat() if getattr(message, "date", None) else None
-            batch.append((int(message.id), message_date))
+            batch.append((message_id, message_date))
             found += 1
+            current_newest = message_id if current_newest is None else max(current_newest, message_id)
+            current_oldest = message_id if current_oldest is None else min(current_oldest, message_id)
 
             if len(batch) >= 500:
                 self.storage.bulk_upsert_messages(chat_id, batch)
                 batch.clear()
-                counts = self._emit_progress(chat_id, title, "indexing")
+                state_kwargs: dict[str, Any] = {}
+                if update_newest:
+                    state_kwargs["newest_indexed_message_id"] = current_newest
+                if update_resume_cursor:
+                    state_kwargs["next_oldest_message_id"] = current_oldest
+                    state_kwargs["index_complete"] = False
+                self.storage.update_chat_index_state(chat_id, **state_kwargs)
+                counts = self._emit_progress(chat_id, title, phase_label)
                 self.storage.set_run_status(run_id, "indexing", counts)
                 self._log("info", "Indexing progress.", chat_id=chat_id, title=title, indexed=counts["indexed"])
-                if control.terminal_status():
-                    break
 
         if batch:
             self.storage.bulk_upsert_messages(chat_id, batch)
-        counts = self._emit_progress(chat_id, title, "indexing")
-        self.storage.update_chat_status(chat_id, "indexed", indexed=True)
-        self._log("info", "Indexing phase complete.", chat_id=chat_id, title=title, indexed=counts["indexed"])
+
+        if current_oldest is not None or current_newest is not None:
+            state_kwargs: dict[str, Any] = {}
+            if update_newest:
+                state_kwargs["newest_indexed_message_id"] = current_newest
+            if update_resume_cursor:
+                state_kwargs["next_oldest_message_id"] = current_oldest
+                state_kwargs["index_complete"] = False
+            self.storage.update_chat_index_state(chat_id, **state_kwargs)
+
+        if not control.terminal_status():
+            if update_resume_cursor:
+                self.storage.update_chat_index_state(chat_id, next_oldest_message_id=None, index_complete=True)
+            elif update_newest and current_newest is not None and bool(self.storage.get_chat_index_state(chat_id).get("index_complete")):
+                self.storage.update_chat_index_state(chat_id, newest_indexed_message_id=current_newest)
+
         return found
 
     async def _run_delete_loop(
@@ -745,7 +1144,7 @@ class TelegramCleanupCore:
                 deleted_at_start=deleted_at_start,
             )
             try:
-                await self._delete_batch_with_flood_wait(
+                deleted_ids, remaining_ids = await self._delete_batch_with_verification(
                     client=client,
                     entity=entity,
                     chat_id=chat_id,
@@ -756,15 +1155,51 @@ class TelegramCleanupCore:
                     deleted_at_start=deleted_at_start,
                     control=control,
                 )
-                self.storage.mark_messages_deleted(chat_id, current_ids)
-                self._log(
-                    "info",
-                    "Batch deleted.",
-                    chat_id=chat_id,
-                    title=title,
-                    batch_number=batch_number,
-                    batch_size=len(current_ids),
-                )
+
+                recovered_ids: list[int] = []
+                if remaining_ids:
+                    recovered_ids = await self._retry_remaining_messages_individually(
+                        client=client,
+                        entity=entity,
+                        chat_id=chat_id,
+                        title=title,
+                        message_ids=remaining_ids,
+                        batch_number=batch_number,
+                        run_started_at=run_started_at,
+                        deleted_at_start=deleted_at_start,
+                        control=control,
+                    )
+                    remaining_ids = [message_id for message_id in remaining_ids if message_id not in recovered_ids]
+
+                successful_ids = [*deleted_ids, *recovered_ids]
+                if successful_ids:
+                    self.storage.mark_messages_deleted(chat_id, successful_ids)
+
+                if remaining_ids:
+                    error_message = "Telegram delete request completed, but the messages still exist after verification."
+                    self.storage.mark_messages_failed(chat_id, remaining_ids, error_message)
+                    self.storage.record_failed_batch(chat_id, remaining_ids, "DeleteVerificationFailed", error_message)
+                    dates = self.storage.get_message_dates(chat_id, remaining_ids)
+                    self._log(
+                        "warning",
+                        "Batch partially deleted. Some messages still exist after verification.",
+                        chat_id=chat_id,
+                        title=title,
+                        batch_number=batch_number,
+                        deleted_count=len(successful_ids),
+                        remaining_count=len(remaining_ids),
+                        message_ids=",".join(str(message_id) for message_id in remaining_ids),
+                        message_dates=",".join(str(dates.get(message_id)) for message_id in remaining_ids),
+                    )
+                else:
+                    self._log(
+                        "info",
+                        "Batch deleted and verified.",
+                        chat_id=chat_id,
+                        title=title,
+                        batch_number=batch_number,
+                        batch_size=len(current_ids),
+                    )
             except Exception as exc:
                 error_message = format_exception_message(exc)
                 self.storage.mark_messages_failed(chat_id, current_ids, error_message)
@@ -815,6 +1250,31 @@ class TelegramCleanupCore:
         )
         return final_counts
 
+    async def _delete_batch_with_verification(
+        self,
+        client: TelegramClient,
+        entity: Any,
+        chat_id: str,
+        title: str,
+        message_ids: list[int],
+        batch_number: int,
+        run_started_at: float,
+        deleted_at_start: int,
+        control: RunControl,
+    ) -> tuple[list[int], list[int]]:
+        await self._delete_batch_with_flood_wait(
+            client=client,
+            entity=entity,
+            chat_id=chat_id,
+            title=title,
+            message_ids=message_ids,
+            batch_number=batch_number,
+            run_started_at=run_started_at,
+            deleted_at_start=deleted_at_start,
+            control=control,
+        )
+        return await self._verify_deleted_message_ids(client, entity, message_ids)
+
     async def _delete_batch_with_flood_wait(
         self,
         client: TelegramClient,
@@ -853,6 +1313,75 @@ class TelegramCleanupCore:
                     )
                     await asyncio.sleep(1)
                 continue
+
+    async def _verify_deleted_message_ids(
+        self,
+        client: TelegramClient,
+        entity: Any,
+        message_ids: list[int],
+    ) -> tuple[list[int], list[int]]:
+        messages = await client.get_messages(entity, ids=message_ids)
+        if not isinstance(messages, list):
+            messages = [messages]
+
+        deleted_ids: list[int] = []
+        remaining_ids: list[int] = []
+        for expected_id, message in zip(message_ids, messages):
+            if message is None or isinstance(message, types.MessageEmpty):
+                deleted_ids.append(expected_id)
+            else:
+                remaining_ids.append(expected_id)
+        return deleted_ids, remaining_ids
+
+    async def _retry_remaining_messages_individually(
+        self,
+        client: TelegramClient,
+        entity: Any,
+        chat_id: str,
+        title: str,
+        message_ids: list[int],
+        batch_number: int,
+        run_started_at: float,
+        deleted_at_start: int,
+        control: RunControl,
+    ) -> list[int]:
+        recovered_ids: list[int] = []
+        for message_id in message_ids:
+            if control.terminal_status():
+                break
+            try:
+                deleted_ids, remaining_ids = await self._delete_batch_with_verification(
+                    client=client,
+                    entity=entity,
+                    chat_id=chat_id,
+                    title=title,
+                    message_ids=[message_id],
+                    batch_number=batch_number,
+                    run_started_at=run_started_at,
+                    deleted_at_start=deleted_at_start,
+                    control=control,
+                )
+                if deleted_ids and not remaining_ids:
+                    recovered_ids.extend(deleted_ids)
+                    self._log(
+                        "info",
+                        "Recovered a message that remained after the batch delete by retrying it individually.",
+                        chat_id=chat_id,
+                        title=title,
+                        batch_number=batch_number,
+                        message_id=message_id,
+                    )
+            except Exception as exc:
+                self._log(
+                    "warning",
+                    "Individual retry for a remaining message failed.",
+                    chat_id=chat_id,
+                    title=title,
+                    batch_number=batch_number,
+                    message_id=message_id,
+                    error=format_exception_message(exc),
+                )
+        return recovered_ids
 
     async def _inter_batch_pause(
         self,
@@ -902,6 +1431,7 @@ class TelegramCleanupCore:
         speed_per_minute: float | None = None
         eta_seconds: float | None = None
         note = None
+        index_complete = bool(counts.get("index_complete"))
         if run_started_at is not None:
             elapsed_seconds = max(0.0, time.monotonic() - run_started_at)
             deleted_since_start = max(0, deleted - deleted_at_start)
@@ -922,6 +1452,9 @@ class TelegramCleanupCore:
             "failed": failed,
             "total": total,
             "percentage": percentage,
+            "index_complete": index_complete,
+            "newest_indexed_message_id": counts.get("newest_indexed_message_id"),
+            "next_oldest_message_id": counts.get("next_oldest_message_id"),
             "speed_per_minute": speed_per_minute,
             "speed_text": format_speed(speed_per_minute),
             "eta_seconds": eta_seconds,
@@ -949,6 +1482,11 @@ class TelegramCleanupCore:
             return await client.get_entity(lookup)
         except (ValueError, errors.UsernameInvalidError, errors.UsernameNotOccupiedError) as exc:
             raise ValueError(f"Unable to resolve chat: {chat_input}") from exc
+
+    def _as_int_or_none(self, value: Any) -> int | None:
+        if value in (None, ""):
+            return None
+        return int(value)
 
     def _get_entity_title(self, entity: Any) -> str:
         title = getattr(entity, "title", None)
