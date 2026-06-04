@@ -8,6 +8,7 @@ It authenticates through Telegram MTProto as a user account with `Telethon`, ind
 
 - Runs locally on your machine. It is not a SaaS product.
 - Authenticates your own Telegram account through GUI fields for API ID, API Hash, phone number, login code, and 2FA password when needed.
+- Supports QR login from the GUI as an alternative to manual code entry when Telegram prefers in-app authorization.
 - Lets you enter one `chat_id` and clean up only that chat for a given run.
 - Indexes your own messages before deletion so the app can resume later and show progress more accurately.
 - Deletes your own messages by message ID with `revoke=True` where Telegram allows it.
@@ -108,10 +109,9 @@ Open the GUI and fill:
 Then:
 
 1. Click `Save API credentials`.
-2. Click `Send code`.
-3. Enter the login code from Telegram.
-4. Click `Sign in`.
-5. If Telegram asks for 2FA, enter the password and click `Submit 2FA password`.
+2. Either click `Send code` and enter the login code from Telegram, or click `QR login` and scan the QR code with Telegram on a device where the account is already logged in.
+3. If you used the code flow, click `Sign in`.
+4. If Telegram asks for 2FA, enter the password and click `Submit 2FA password`.
 
 The app shows auth status values:
 
@@ -123,6 +123,14 @@ The app shows auth status values:
 - `auth error`
 
 After successful authorization, the app shows available account information such as username, phone number, and first/last name when Telegram provides them.
+
+### QR login notes
+
+- `QR login` opens a separate QR window inside the app.
+- The QR code is generated locally; the app does not send it to any external QR service.
+- While the QR is shown, the app keeps the Telethon `qr_login().wait()` flow active in the background.
+- If the QR token expires before you scan it, the app automatically generates a fresh QR token.
+- If the QR scan is accepted but Telegram requires 2FA, enter the password in the main window and click `Submit 2FA password`.
 
 ### 2. List groups
 
