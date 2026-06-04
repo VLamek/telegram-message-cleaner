@@ -97,7 +97,6 @@ The app shows:
 - Authorized account label, for example: `Authorized as @username` or `Authorized as +phone`
 - Chat ID input
 - Date/time range inputs
-- Message type checkboxes
 - Start cleanup button
 - Index only button
 - Pause after current batch button
@@ -293,7 +292,7 @@ The default date/time range must cover the full available chat history:
 
 The GUI must allow custom date/time input for the current indexing/deletion run. Supported input should include `YYYY-MM-DD HH:MM`; date-only input may be accepted as a convenience.
 
-The GUI must allow choosing message types for the current indexing/deletion run.
+The GUI must allow choosing message types for the current deletion run in a modal dialog opened from deletion actions, not as a permanent block in the main window.
 
 By default, all message types must be selected.
 

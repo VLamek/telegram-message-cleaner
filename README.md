@@ -187,7 +187,7 @@ By default, the date/time range fields are:
 
 That means the app covers the full available chat history, like before. To limit the current run, replace those values with a local date/time such as `2026-01-01 00:00` and `2026-01-31 23:59`. A date without time, such as `2026-01-01`, means start of that day in `From` and end of that day in `To`.
 
-By default, all message type checkboxes are enabled. You can limit the current run to types such as text, links, photos, videos, GIFs, voice messages, video circles, files, stickers, polls, or other message records.
+When you start a deletion action, the app opens a modal message type selector. By default, all message types are enabled. You can limit the current run to types such as text, links, photos, videos, GIFs, voice messages, video circles, files, stickers, polls, or other message records.
 
 If `Require confirmation before deletion` is enabled for one selected chat, the app resolves the chat first and then shows a confirmation dialog with:
 

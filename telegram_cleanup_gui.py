@@ -271,33 +271,6 @@ class TelegramCleanupGUI:
         self.retry_failed_button.grid(row=3, column=1, sticky="ew", padx=6, pady=(0, 8))
         self.delete_local_db_button.grid(row=3, column=2, columnspan=2, sticky="ew", padx=6, pady=(0, 8))
 
-        self.message_types_frame = ttk.LabelFrame(self.cleanup_frame)
-        self.message_types_frame.grid(row=4, column=0, columnspan=6, sticky="ew", padx=6, pady=(0, 8))
-        for column in range(6):
-            self.message_types_frame.columnconfigure(column, weight=1)
-        self._register_widget_text(self.message_types_frame, "message_types")
-
-        self.all_message_types_check = ttk.Checkbutton(
-            self.message_types_frame,
-            variable=self.all_message_types_var,
-            command=self._on_all_message_types_toggled,
-        )
-        self.all_message_types_check.grid(row=0, column=0, sticky="w", padx=6, pady=3)
-        self._register_widget_text(self.all_message_types_check, "message_type_all")
-
-        self.message_type_checks: dict[str, ttk.Checkbutton] = {}
-        for index, message_type in enumerate(MESSAGE_TYPE_OPTIONS):
-            row = 1 + index // 6
-            column = index % 6
-            check = ttk.Checkbutton(
-                self.message_types_frame,
-                variable=self.message_type_vars[message_type],
-                command=self._on_message_type_toggled,
-            )
-            check.grid(row=row, column=column, sticky="w", padx=6, pady=3)
-            self._register_widget_text(check, f"message_type_{message_type}")
-            self.message_type_checks[message_type] = check
-
         self._register_widget_text(self.list_groups_button, "list_groups")
         self._register_widget_text(self.index_only_button, "index_only")
         self._register_widget_text(self.start_cleanup_button, "start_cleanup")
@@ -682,7 +655,7 @@ class TelegramCleanupGUI:
         if date_range_settings is None:
             return
         date_from, date_to = date_range_settings
-        message_types = self._get_message_type_settings()
+        message_types = self._open_message_type_selection_modal()
         if message_types is None:
             return
         if len(chat_ids) > 1:
@@ -718,7 +691,7 @@ class TelegramCleanupGUI:
         if date_range_settings is None:
             return
         date_from, date_to = date_range_settings
-        message_types = self._get_message_type_settings()
+        message_types = self._open_message_type_selection_modal()
         if message_types is None:
             return
         if len(chat_ids) > 1:
@@ -2048,6 +2021,103 @@ class TelegramCleanupGUI:
             return None
         self.core.save_config({"message_types": selected})
         return selected
+
+    def _open_message_type_selection_modal(self) -> list[str] | None:
+        window = tk.Toplevel(self.root)
+        window.title(self.translator.gettext("message_types_modal_title"))
+        window.geometry("560x360")
+        window.minsize(500, 320)
+        window.transient(self.root)
+        window.grab_set()
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+
+        local_vars = {
+            message_type: tk.BooleanVar(value=self.message_type_vars[message_type].get())
+            for message_type in MESSAGE_TYPE_OPTIONS
+        }
+        all_var = tk.BooleanVar(value=all(variable.get() for variable in local_vars.values()))
+        result: dict[str, list[str] | None] = {"message_types": None}
+
+        header = ttk.Label(
+            window,
+            text=self.translator.gettext("message_types_modal_message"),
+            wraplength=520,
+            justify="left",
+        )
+        header.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+
+        body = ttk.Frame(window)
+        body.grid(row=1, column=0, sticky="nsew", padx=14, pady=8)
+        for column in range(3):
+            body.columnconfigure(column, weight=1)
+
+        def sync_all_var() -> None:
+            all_var.set(all(variable.get() for variable in local_vars.values()))
+
+        def set_all() -> None:
+            enabled = all_var.get()
+            for variable in local_vars.values():
+                variable.set(enabled)
+
+        all_check = ttk.Checkbutton(
+            body,
+            text=self.translator.gettext("message_type_all"),
+            variable=all_var,
+            command=set_all,
+        )
+        all_check.grid(row=0, column=0, columnspan=3, sticky="w", padx=6, pady=4)
+
+        for index, message_type in enumerate(MESSAGE_TYPE_OPTIONS):
+            row = 1 + index // 3
+            column = index % 3
+            check = ttk.Checkbutton(
+                body,
+                text=self.translator.gettext(f"message_type_{message_type}"),
+                variable=local_vars[message_type],
+                command=sync_all_var,
+            )
+            check.grid(row=row, column=column, sticky="w", padx=6, pady=4)
+
+        buttons = ttk.Frame(window)
+        buttons.grid(row=2, column=0, sticky="ew", padx=14, pady=(8, 14))
+        buttons.columnconfigure(0, weight=1)
+
+        def confirm() -> None:
+            selected = [
+                message_type
+                for message_type in MESSAGE_TYPE_OPTIONS
+                if local_vars[message_type].get()
+            ]
+            try:
+                parse_message_type_filter(selected)
+            except ValueError as exc:
+                messagebox.showwarning(
+                    self.translator.gettext("warning_title"),
+                    str(exc),
+                    parent=window,
+                )
+                return
+            for message_type in MESSAGE_TYPE_OPTIONS:
+                self.message_type_vars[message_type].set(message_type in selected)
+            self.all_message_types_var.set(set(selected) == set(MESSAGE_TYPE_OPTIONS))
+            self.core.save_config({"message_types": selected})
+            result["message_types"] = selected
+            window.destroy()
+
+        def cancel() -> None:
+            result["message_types"] = None
+            window.destroy()
+
+        continue_button = ttk.Button(buttons, text=self.translator.gettext("continue"), command=confirm)
+        cancel_button = ttk.Button(buttons, text=self.translator.gettext("cancel"), command=cancel)
+        continue_button.grid(row=0, column=1, sticky="e", padx=(0, 8))
+        cancel_button.grid(row=0, column=2, sticky="e")
+
+        window.protocol("WM_DELETE_WINDOW", cancel)
+        window.focus_force()
+        self.root.wait_window(window)
+        return result["message_types"]
 
     def _format_message_types_for_display(self, message_types: list[str] | None) -> str:
         if not message_types or set(message_types) == set(MESSAGE_TYPE_OPTIONS):
