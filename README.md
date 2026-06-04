@@ -1,17 +1,21 @@
 # Telegram Message Cleaner
 
-`Telegram Message Cleaner` is a local Windows-first desktop utility for deleting your own Telegram messages from one selected chat at a time.
+`Telegram Message Cleaner` is a local Windows-first desktop utility for deleting your own Telegram messages from selected Telegram chats.
 
-It authenticates through Telegram MTProto as a user account with `Telethon`, indexes message IDs for one explicit `chat_id`, stores only local progress metadata in SQLite, and then deletes pending message IDs in batches while showing progress, ETA, logs, pause/stop state, and retry information for failed deletions.
+It authenticates through Telegram MTProto as a user account with `Telethon`, indexes message IDs for explicit `chat_id` values, stores only local progress metadata in SQLite, and then deletes pending message IDs in batches while showing progress, ETA, logs, pause/stop state, and retry information for failed deletions.
 
 ## What the app does
 
 - Runs locally on your machine. It is not a SaaS product.
 - Authenticates your own Telegram account through GUI fields for API ID, API Hash, phone number, login code, and 2FA password when needed.
 - Supports QR login from the GUI as an alternative to manual code entry when Telegram prefers in-app authorization.
-- Lets you enter one `chat_id` and clean up only that chat for a given run.
+- Lets you enter one `chat_id`, or select multiple chats in the GUI picker for sequential processing.
+- Lets you limit the current indexing/deletion run to a custom date/time range.
+- Lets you choose which message types to delete in the current run.
 - Indexes your own messages before deletion so the app can resume later and show progress more accurately.
 - Deletes your own messages by message ID with `revoke=True` where Telegram allows it.
+- Uses the main SQLite database as a local work queue. Confirmed deleted messages are removed from that queue after verification.
+- Moves failed deletion metadata into a separate failed SQLite database so retry can work without leaving completed work in the main database.
 - Stores local progress metadata only:
   - `chat_id`
   - `message_id`
@@ -21,11 +25,12 @@ It authenticates through Telegram MTProto as a user account with `Telethon`, ind
   - timestamps and run metadata
 - Shows logs in the GUI and in local rotating log files.
 - Supports `Pause after current batch`, `Stop after current batch`, resume on the next run, and `Retry failed`.
+- On startup, offers to continue locally saved unfinished progress in a visible dialog.
 
 ## What the app does not do
 
-- It does not delete across all groups automatically.
-- It does not scan all dialogs and clean everything at once.
+- It does not delete across all groups automatically without explicit selection and warnings.
+- It does not scan all dialogs and clean everything in the background.
 - It does not clean multiple groups in parallel.
 - It does not use the Telegram Bot API.
 - It does not send your data anywhere except normal Telegram API calls needed for your own account operations.
@@ -37,7 +42,7 @@ It authenticates through Telegram MTProto as a user account with `Telethon`, ind
 - Deletion is irreversible.
 - Telegram may refuse or limit some deletion operations depending on chat type, permissions, historical limits, service-message behavior, or API restrictions.
 - Some message IDs may remain failed even after retries.
-- The app now verifies after each delete request whether the target `message_id` actually disappeared. If Telegram leaves some items behind, they stay tracked as `failed` instead of being reported as deleted.
+- The app now verifies after each delete request whether the target `message_id` actually disappeared. If Telegram leaves some items behind, they are moved to the separate failed database instead of being reported as deleted.
 - Poll messages sent by the user can be deleted when Telegram allows it, but resetting poll votes themselves is not guaranteed by Telegram.
 - Session files must never be shared with another person.
 
@@ -94,6 +99,9 @@ CLI options:
 - `--chat-id`
 - `--batch-size` default `100`
 - `--pause` default `2`
+- `--from-date` default `first`
+- `--to-date` default `last`
+- `--message-types` default `all`
 - `--db-file` default `telegram_message_cleaner.sqlite3`
 
 ## GUI flow
@@ -140,8 +148,9 @@ The app opens a separate chat selection window with:
 
 - a search field
 - a scrollable table of dialogs
-- double-click selection
-- automatic filling of the chosen `chat_id` back into the main window
+- checkbox-style row selection
+- an `All` checkbox that requires two separate warning confirmations before it selects every loaded chat
+- automatic filling of the chosen `chat_id` values back into the main window
 
 The GUI log will also print dialog metadata such as:
 
@@ -152,11 +161,11 @@ The GUI log will also print dialog metadata such as:
 
 This action does not delete anything.
 
-### 3. Enter one Chat ID
+### 3. Enter Chat IDs
 
-Paste one explicit Telegram `chat_id` into the `Chat ID` field, or select it from the graphical chat picker opened by `List groups`.
+Paste one explicit Telegram `chat_id` into the `Chat ID` field, paste multiple IDs separated by commas, or select chats from the graphical chat picker opened by `List groups`.
 
-The app is intentionally limited to one chat per cleanup run.
+When multiple chats are selected, the app processes them sequentially, one chat at a time. It does not run parallel cleanup across chats.
 
 ### 4. Start cleanup
 
@@ -171,16 +180,29 @@ Then click:
 - `Start cleanup` if you want indexing followed by deletion
 - `Delete indexed only` if you want to delete the already indexed subset immediately without waiting for a full indexing pass
 
-If `Require confirmation before deletion` is enabled, the app resolves the chat first and then shows a confirmation dialog with:
+By default, the date/time range fields are:
+
+- `From date/time`: `first`
+- `To date/time`: `last`
+
+That means the app covers the full available chat history, like before. To limit the current run, replace those values with a local date/time such as `2026-01-01 00:00` and `2026-01-31 23:59`. A date without time, such as `2026-01-01`, means start of that day in `From` and end of that day in `To`.
+
+By default, all message type checkboxes are enabled. You can limit the current run to types such as text, links, photos, videos, GIFs, voice messages, video circles, files, stickers, polls, or other message records.
+
+If `Require confirmation before deletion` is enabled for one selected chat, the app resolves the chat first and then shows a confirmation dialog with:
 
 - chat title
 - chat ID
 - currently known indexed count
+- selected date/time range
+- selected message types
 - an irreversible deletion warning
+
+If multiple chats are selected, the app shows a multi-chat confirmation warning before deletion starts. Chats are still processed one by one.
 
 ### 5. How indexing works
 
-Indexing scans the selected chat and records only minimal metadata for messages sent by the authorized user.
+Indexing scans the selected chat and records only minimal metadata for messages sent by the authorized user inside the selected date/time range and selected message types.
 
 It does not store:
 
@@ -212,15 +234,18 @@ During indexing, progress is count-based rather than true percentage-based becau
 - `Pause after current batch` finishes the active batch, saves SQLite state, and pauses safely.
 - `Stop after current batch` finishes the active batch, saves SQLite state, and stops safely.
 - To resume later, run the app again, enter the same `chat_id`, and click `Start cleanup`.
+- If the app finds unfinished local progress on startup, it shows a dialog over the main window so you can continue, review the saved progress, or dismiss it.
 - If you only want to delete the already discovered subset first, use `Delete indexed only` in the GUI or `delete-indexed` in the CLI.
 
 If new messages appeared in the same chat after a previous run, a new indexing pass adds only new message IDs without duplicating older records.
 
 ### 8. Retry failed
 
-`Retry failed` attempts deletion again for message IDs currently marked as failed in the local database.
+`Retry failed` attempts deletion again for message IDs stored in the separate failed database.
 
 The app still does not store message content during this process.
+
+After a deletion run finishes from start to end, the main progress database is cleared for that chat. Failed message metadata, if any, remains in the failed database for retry.
 
 ## Local database and logs
 
@@ -233,6 +258,7 @@ When running as a frozen Windows build, local runtime files are kept next to the
 - `telegram_message_cleaner_config.json`
 - `telegram_message_cleaner.session`
 - `telegram_message_cleaner.sqlite3`
+- `telegram_message_cleaner_failed.sqlite3`
 - `TelegramMessageCleaner_Logs/latest.log`
 - `TelegramMessageCleaner_Logs/history.log`
 
@@ -241,6 +267,7 @@ You can delete the local progress database with `Delete local progress database`
 That action:
 
 - deletes only local progress metadata
+- deletes both the main progress database and the failed retry database
 - does not restore already deleted Telegram messages
 
 ## Simple light/dark theme

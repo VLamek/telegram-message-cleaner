@@ -8,7 +8,15 @@ from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
-from telegram_cleanup_core import APP_NAME, DB_FILE_NAME, RunControl, TelegramCleanupCore
+from telegram_cleanup_core import (
+    APP_NAME,
+    DB_FILE_NAME,
+    MESSAGE_TYPE_OPTIONS,
+    RunControl,
+    TelegramCleanupCore,
+    parse_message_date_range,
+    parse_message_type_filter,
+)
 from telegram_cleanup_i18n import Translator
 from telegram_cleanup_qr import create_qr_photoimage
 
@@ -32,8 +40,12 @@ class TelegramCleanupGUI:
         self.current_auth_status = "not configured"
         self.chat_selector_window: tk.Toplevel | None = None
         self.chat_selector_search_var = tk.StringVar()
+        self.chat_selector_all_var = tk.BooleanVar(value=False)
         self.chat_selector_dialogs: list[dict[str, Any]] = []
         self.chat_selector_filtered_dialogs: list[dict[str, Any]] = []
+        self.chat_selector_selected_ids: set[str] = set()
+        self.selected_chat_ids: list[str] = []
+        self.selected_chat_titles: dict[str, str] = {}
         self.qr_login_window: tk.Toplevel | None = None
         self.qr_photoimage: tk.PhotoImage | None = None
         self.qr_url_var = tk.StringVar()
@@ -41,6 +53,8 @@ class TelegramCleanupGUI:
         self.qr_expires_var = tk.StringVar()
         self.qr_expires_at: datetime | None = None
         self.qr_countdown_job: str | None = None
+        self.resume_prompt_window: tk.Toplevel | None = None
+        self.resume_candidate: dict[str, Any] | None = None
 
         self._create_variables()
         self._build_layout()
@@ -57,6 +71,7 @@ class TelegramCleanupGUI:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._process_event_queue)
         self._launch_worker("refresh_auth_status", self.core.get_auth_status)
+        self.root.after(900, self._show_resume_prompt_if_needed)
 
     def _create_variables(self) -> None:
         config = self.core.get_config()
@@ -69,6 +84,19 @@ class TelegramCleanupGUI:
         self.chat_id_var = tk.StringVar()
         self.batch_size_var = tk.StringVar(value="100")
         self.pause_seconds_var = tk.StringVar(value="2")
+        self.date_from_var = tk.StringVar(value=str(config.get("date_from", "first") or "first"))
+        self.date_to_var = tk.StringVar(value=str(config.get("date_to", "last") or "last"))
+        saved_message_types = config.get("message_types") or list(MESSAGE_TYPE_OPTIONS)
+        if isinstance(saved_message_types, str):
+            saved_message_types = [item.strip() for item in saved_message_types.split(",") if item.strip()]
+        selected_message_types = set(saved_message_types) & set(MESSAGE_TYPE_OPTIONS)
+        if not selected_message_types:
+            selected_message_types = set(MESSAGE_TYPE_OPTIONS)
+        self.message_type_vars = {
+            message_type: tk.BooleanVar(value=message_type in selected_message_types)
+            for message_type in MESSAGE_TYPE_OPTIONS
+        }
+        self.all_message_types_var = tk.BooleanVar(value=selected_message_types == set(MESSAGE_TYPE_OPTIONS))
         self.db_path_var = tk.StringVar(value=str(self.core.get_database_path()))
         self.require_confirmation_var = tk.BooleanVar(
             value=bool(config.get("require_confirmation_before_deletion", True))
@@ -192,22 +220,35 @@ class TelegramCleanupGUI:
         self.chat_id_label = ttk.Label(self.cleanup_frame)
         self.batch_size_label = ttk.Label(self.cleanup_frame)
         self.pause_label = ttk.Label(self.cleanup_frame)
+        self.date_from_label = ttk.Label(self.cleanup_frame)
+        self.date_to_label = ttk.Label(self.cleanup_frame)
+        self.date_format_hint_label = ttk.Label(self.cleanup_frame)
 
         self.chat_id_label.grid(row=0, column=0, sticky="w", padx=6, pady=4)
         self.batch_size_label.grid(row=0, column=2, sticky="w", padx=6, pady=4)
         self.pause_label.grid(row=0, column=4, sticky="w", padx=6, pady=4)
+        self.date_from_label.grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        self.date_to_label.grid(row=1, column=2, sticky="w", padx=6, pady=4)
+        self.date_format_hint_label.grid(row=1, column=4, columnspan=2, sticky="w", padx=6, pady=4)
 
         self._register_widget_text(self.chat_id_label, "chat_id")
         self._register_widget_text(self.batch_size_label, "batch_size")
         self._register_widget_text(self.pause_label, "pause_between_batches")
+        self._register_widget_text(self.date_from_label, "date_from")
+        self._register_widget_text(self.date_to_label, "date_to")
+        self._register_widget_text(self.date_format_hint_label, "date_format_hint")
 
         self.chat_id_entry = ttk.Entry(self.cleanup_frame, textvariable=self.chat_id_var)
         self.batch_size_entry = ttk.Entry(self.cleanup_frame, textvariable=self.batch_size_var, width=10)
         self.pause_entry = ttk.Entry(self.cleanup_frame, textvariable=self.pause_seconds_var, width=10)
+        self.date_from_entry = ttk.Entry(self.cleanup_frame, textvariable=self.date_from_var)
+        self.date_to_entry = ttk.Entry(self.cleanup_frame, textvariable=self.date_to_var)
 
         self.chat_id_entry.grid(row=0, column=1, sticky="ew", padx=6, pady=4)
         self.batch_size_entry.grid(row=0, column=3, sticky="ew", padx=6, pady=4)
         self.pause_entry.grid(row=0, column=5, sticky="ew", padx=6, pady=4)
+        self.date_from_entry.grid(row=1, column=1, sticky="ew", padx=6, pady=4)
+        self.date_to_entry.grid(row=1, column=3, sticky="ew", padx=6, pady=4)
 
         self.chat_id_entry.bind("<FocusOut>", lambda _event: self._load_local_chat_state())
         self.chat_id_entry.bind("<Return>", lambda _event: self._load_local_chat_state())
@@ -221,14 +262,41 @@ class TelegramCleanupGUI:
         self.retry_failed_button = ttk.Button(self.cleanup_frame, command=self._retry_failed)
         self.delete_local_db_button = ttk.Button(self.cleanup_frame, command=self._delete_local_db)
 
-        self.list_groups_button.grid(row=1, column=0, sticky="ew", padx=6, pady=8)
-        self.index_only_button.grid(row=1, column=1, sticky="ew", padx=6, pady=8)
-        self.start_cleanup_button.grid(row=1, column=2, sticky="ew", padx=6, pady=8)
-        self.pause_after_batch_button.grid(row=1, column=3, sticky="ew", padx=6, pady=8)
-        self.stop_after_batch_button.grid(row=1, column=4, sticky="ew", padx=6, pady=8)
-        self.delete_indexed_only_button.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 8))
-        self.retry_failed_button.grid(row=2, column=1, sticky="ew", padx=6, pady=(0, 8))
-        self.delete_local_db_button.grid(row=2, column=2, columnspan=2, sticky="ew", padx=6, pady=(0, 8))
+        self.list_groups_button.grid(row=2, column=0, sticky="ew", padx=6, pady=8)
+        self.index_only_button.grid(row=2, column=1, sticky="ew", padx=6, pady=8)
+        self.start_cleanup_button.grid(row=2, column=2, sticky="ew", padx=6, pady=8)
+        self.pause_after_batch_button.grid(row=2, column=3, sticky="ew", padx=6, pady=8)
+        self.stop_after_batch_button.grid(row=2, column=4, sticky="ew", padx=6, pady=8)
+        self.delete_indexed_only_button.grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 8))
+        self.retry_failed_button.grid(row=3, column=1, sticky="ew", padx=6, pady=(0, 8))
+        self.delete_local_db_button.grid(row=3, column=2, columnspan=2, sticky="ew", padx=6, pady=(0, 8))
+
+        self.message_types_frame = ttk.LabelFrame(self.cleanup_frame)
+        self.message_types_frame.grid(row=4, column=0, columnspan=6, sticky="ew", padx=6, pady=(0, 8))
+        for column in range(6):
+            self.message_types_frame.columnconfigure(column, weight=1)
+        self._register_widget_text(self.message_types_frame, "message_types")
+
+        self.all_message_types_check = ttk.Checkbutton(
+            self.message_types_frame,
+            variable=self.all_message_types_var,
+            command=self._on_all_message_types_toggled,
+        )
+        self.all_message_types_check.grid(row=0, column=0, sticky="w", padx=6, pady=3)
+        self._register_widget_text(self.all_message_types_check, "message_type_all")
+
+        self.message_type_checks: dict[str, ttk.Checkbutton] = {}
+        for index, message_type in enumerate(MESSAGE_TYPE_OPTIONS):
+            row = 1 + index // 6
+            column = index % 6
+            check = ttk.Checkbutton(
+                self.message_types_frame,
+                variable=self.message_type_vars[message_type],
+                command=self._on_message_type_toggled,
+            )
+            check.grid(row=row, column=column, sticky="w", padx=6, pady=3)
+            self._register_widget_text(check, f"message_type_{message_type}")
+            self.message_type_checks[message_type] = check
 
         self._register_widget_text(self.list_groups_button, "list_groups")
         self._register_widget_text(self.index_only_button, "index_only")
@@ -463,6 +531,7 @@ class TelegramCleanupGUI:
 
         if self.chat_selector_window and self.chat_selector_window.winfo_exists():
             self.chat_selector_window.title(self.translator.gettext("select_chat"))
+            self.chat_selector_tree.heading("selected", text=self.translator.gettext("chat_selected_column"))
             self.chat_selector_tree.heading("title", text=self.translator.gettext("chat_title_column"))
             self.chat_selector_tree.heading("id", text=self.translator.gettext("chat_id_column"))
             self.chat_selector_tree.heading("username", text=self.translator.gettext("chat_username_column"))
@@ -577,53 +646,112 @@ class TelegramCleanupGUI:
         self._list_groups()
 
     def _index_only(self) -> None:
-        chat_id = self._require_chat_id()
-        if not chat_id:
+        chat_ids = self._require_chat_ids()
+        if not chat_ids:
             return
+        date_range_settings = self._get_date_range_settings()
+        if date_range_settings is None:
+            return
+        date_from, date_to = date_range_settings
+        message_types = self._get_message_type_settings()
+        if message_types is None:
+            return
+        if len(chat_ids) > 1:
+            self._launch_multi_chat_worker("index", chat_ids, None, None, date_from, date_to, message_types)
+            return
+        chat_id = chat_ids[0]
         control = RunControl()
-        self._launch_worker("index", self.core.index_messages, chat_id, control=control)
+        self._launch_worker(
+            "index",
+            self.core.index_messages,
+            chat_id,
+            control=control,
+            date_from=date_from,
+            date_to=date_to,
+            message_types=message_types,
+        )
 
     def _start_cleanup(self) -> None:
-        chat_id = self._require_chat_id()
-        if not chat_id:
+        chat_ids = self._require_chat_ids()
+        if not chat_ids:
             return
         batch_size, pause_seconds = self._get_batch_settings()
         if batch_size is None or pause_seconds is None:
+            return
+        date_range_settings = self._get_date_range_settings()
+        if date_range_settings is None:
+            return
+        date_from, date_to = date_range_settings
+        message_types = self._get_message_type_settings()
+        if message_types is None:
+            return
+        if len(chat_ids) > 1:
+            if self.require_confirmation_var.get() and not self._confirm_multi_chat_deletion(chat_ids, date_from, date_to, message_types):
+                self._append_log("Multi-chat cleanup cancelled by user before deletion.")
+                return
+            self._launch_multi_chat_worker("cleanup", chat_ids, batch_size, pause_seconds, date_from, date_to, message_types)
             return
 
         if self.require_confirmation_var.get():
             self.pending_cleanup_request = {
                 "mode": "cleanup",
-                "chat_id": chat_id,
+                "chat_id": chat_ids[0],
                 "batch_size": batch_size,
                 "pause_seconds": pause_seconds,
+                "date_from": date_from,
+                "date_to": date_to,
+                "message_types": message_types,
             }
-            self._launch_worker("prepare_cleanup", self.core.get_chat_overview, chat_id)
+            self._launch_worker("prepare_cleanup", self.core.get_chat_overview, chat_ids[0])
             return
 
-        self._launch_cleanup_worker(chat_id, batch_size, pause_seconds)
+        self._launch_cleanup_worker(chat_ids[0], batch_size, pause_seconds, date_from, date_to, message_types)
 
     def _delete_indexed_only(self) -> None:
-        chat_id = self._require_chat_id()
-        if not chat_id:
+        chat_ids = self._require_chat_ids()
+        if not chat_ids:
             return
         batch_size, pause_seconds = self._get_batch_settings()
         if batch_size is None or pause_seconds is None:
+            return
+        date_range_settings = self._get_date_range_settings()
+        if date_range_settings is None:
+            return
+        date_from, date_to = date_range_settings
+        message_types = self._get_message_type_settings()
+        if message_types is None:
+            return
+        if len(chat_ids) > 1:
+            if self.require_confirmation_var.get() and not self._confirm_multi_chat_deletion(chat_ids, date_from, date_to, message_types):
+                self._append_log("Multi-chat delete indexed only cancelled by user before deletion.")
+                return
+            self._launch_multi_chat_worker("delete_indexed_only", chat_ids, batch_size, pause_seconds, date_from, date_to, message_types)
             return
 
         if self.require_confirmation_var.get():
             self.pending_cleanup_request = {
                 "mode": "delete_indexed_only",
-                "chat_id": chat_id,
+                "chat_id": chat_ids[0],
                 "batch_size": batch_size,
                 "pause_seconds": pause_seconds,
+                "date_from": date_from,
+                "date_to": date_to,
+                "message_types": message_types,
             }
-            self._launch_worker("prepare_cleanup", self.core.get_chat_overview, chat_id)
+            self._launch_worker("prepare_cleanup", self.core.get_chat_overview, chat_ids[0])
             return
 
-        self._launch_delete_indexed_only_worker(chat_id, batch_size, pause_seconds)
+        self._launch_delete_indexed_only_worker(chat_ids[0], batch_size, pause_seconds, date_from, date_to, message_types)
 
-    def _launch_cleanup_worker(self, chat_id: str, batch_size: int, pause_seconds: float) -> None:
+    def _launch_cleanup_worker(
+        self,
+        chat_id: str,
+        batch_size: int,
+        pause_seconds: float,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        message_types: list[str] | None = None,
+    ) -> None:
         control = RunControl()
         self._launch_worker(
             "cleanup",
@@ -632,9 +760,20 @@ class TelegramCleanupGUI:
             batch_size,
             pause_seconds,
             control=control,
+            date_from=date_from,
+            date_to=date_to,
+            message_types=message_types,
         )
 
-    def _launch_delete_indexed_only_worker(self, chat_id: str, batch_size: int, pause_seconds: float) -> None:
+    def _launch_delete_indexed_only_worker(
+        self,
+        chat_id: str,
+        batch_size: int,
+        pause_seconds: float,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        message_types: list[str] | None = None,
+    ) -> None:
         control = RunControl()
         self._launch_worker(
             "delete_indexed_only",
@@ -643,7 +782,175 @@ class TelegramCleanupGUI:
             batch_size,
             pause_seconds,
             control=control,
+            date_from=date_from,
+            date_to=date_to,
+            message_types=message_types,
         )
+
+    def _launch_index_worker(
+        self,
+        chat_id: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        message_types: list[str] | None = None,
+    ) -> None:
+        control = RunControl()
+        self._launch_worker(
+            "index",
+            self.core.index_messages,
+            chat_id,
+            control=control,
+            date_from=date_from,
+            date_to=date_to,
+            message_types=message_types,
+        )
+
+    def _launch_multi_chat_worker(
+        self,
+        mode: str,
+        chat_ids: list[str],
+        batch_size: int | None,
+        pause_seconds: float | None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        message_types: list[str] | None = None,
+    ) -> None:
+        control = RunControl()
+        action = f"multi_{mode}"
+
+        def run_multi() -> dict[str, Any]:
+            results: list[dict[str, Any]] = []
+            errors: list[dict[str, str]] = []
+            total = len(chat_ids)
+            self._queue_log(
+                f"Starting {mode} for {total} selected chats. Chats will be processed one by one."
+            )
+            for index, chat_id in enumerate(chat_ids, start=1):
+                if control.stop_requested() or control.pause_requested():
+                    break
+                title = self.selected_chat_titles.get(chat_id, "")
+                self._queue_log(f"Processing chat {index}/{total}.", chat_id=chat_id, title=title)
+                self.event_queue.put(
+                    {
+                        "type": "progress",
+                        "snapshot": {
+                            "phase": f"{mode} {index}/{total}",
+                            "title": title or self.translator.gettext("none"),
+                            "chat_id": chat_id,
+                            "indexed": 0,
+                            "deleted": 0,
+                            "pending": 0,
+                            "failed": 0,
+                            "percentage": round(((index - 1) / max(total, 1)) * 100, 2),
+                            "speed_text": self.translator.gettext("calculating"),
+                            "eta_text": self.translator.gettext("calculating"),
+                            "batch_number": 0,
+                            "flood_wait_seconds": None,
+                        },
+                    }
+                )
+                try:
+                    if mode == "index":
+                        result = self.core.index_messages(
+                            chat_id,
+                            control=control,
+                            date_from=date_from,
+                            date_to=date_to,
+                            message_types=message_types,
+                        )
+                    elif mode == "delete_indexed_only":
+                        result = self.core.delete_indexed_only(
+                            chat_id,
+                            batch_size or 100,
+                            pause_seconds if pause_seconds is not None else 2.0,
+                            control=control,
+                            date_from=date_from,
+                            date_to=date_to,
+                            message_types=message_types,
+                        )
+                    elif mode == "retry_failed":
+                        result = self.core.retry_failed(
+                            chat_id,
+                            batch_size or 100,
+                            pause_seconds if pause_seconds is not None else 2.0,
+                            control=control,
+                            date_from=date_from,
+                            date_to=date_to,
+                            message_types=message_types,
+                        )
+                    else:
+                        result = self.core.start_cleanup(
+                            chat_id,
+                            batch_size or 100,
+                            pause_seconds if pause_seconds is not None else 2.0,
+                            control=control,
+                            date_from=date_from,
+                            date_to=date_to,
+                            message_types=message_types,
+                        )
+                    results.append(result)
+                    self._queue_log(
+                        f"Finished chat {index}/{total} with status={result.get('status')}.",
+                        chat_id=str(result.get("chat_id") or chat_id),
+                        title=str(result.get("title") or title),
+                    )
+                    if result.get("status") in {"paused", "stopped"}:
+                        break
+                except Exception as exc:
+                    error_text = str(exc)
+                    errors.append({"chat_id": chat_id, "error": error_text})
+                    self._queue_log(
+                        f"Chat {index}/{total} failed; continuing with the next selected chat.",
+                        chat_id=chat_id,
+                        title=title,
+                        error=error_text,
+                    )
+
+            status = control.terminal_status()
+            if not status:
+                status = "completed_with_errors" if errors else "completed"
+
+            counts = self._summarize_multi_results(results)
+            counts["percentage"] = 100 if status == "completed" else counts.get("percentage", 0)
+            return {
+                "status": status,
+                "mode": mode,
+                "chat_id": ", ".join(chat_ids),
+                "title": self.translator.gettext("multi_chat_title", count=len(chat_ids)),
+                "counts": counts,
+                "results": results,
+                "errors": errors,
+            }
+
+        self._launch_worker(action, run_multi, control=control)
+
+    def _summarize_multi_results(self, results: list[dict[str, Any]]) -> dict[str, Any]:
+        summary = {
+            "indexed": 0,
+            "deleted": 0,
+            "pending": 0,
+            "failed": 0,
+            "percentage": 0,
+            "speed_text": self.translator.gettext("calculating"),
+            "eta_text": self.translator.gettext("calculating"),
+            "batch_number": 0,
+        }
+        for result in results:
+            counts = result.get("counts", {}) if isinstance(result, dict) else {}
+            summary["indexed"] += int(counts.get("indexed") or 0)
+            summary["deleted"] += int(counts.get("deleted") or 0)
+            summary["pending"] += int(counts.get("pending") or 0)
+            summary["failed"] += int(counts.get("failed") or 0)
+            summary["batch_number"] += int(counts.get("batch_number") or 0)
+        total = summary["deleted"] + summary["pending"] + summary["failed"]
+        if total > 0:
+            summary["percentage"] = round(((summary["deleted"] + summary["failed"]) / total) * 100, 2)
+        return summary
+
+    def _queue_log(self, message: str, **context: Any) -> None:
+        payload = {"type": "log", "message": message}
+        payload.update(context)
+        self.event_queue.put(payload)
 
     def _pause_after_batch(self) -> None:
         if not self.current_control:
@@ -656,12 +963,23 @@ class TelegramCleanupGUI:
         self.core.request_stop(self.current_control)
 
     def _retry_failed(self) -> None:
-        chat_id = self._require_chat_id()
-        if not chat_id:
+        chat_ids = self._require_chat_ids()
+        if not chat_ids:
             return
         batch_size, pause_seconds = self._get_batch_settings()
         if batch_size is None or pause_seconds is None:
             return
+        date_range_settings = self._get_date_range_settings()
+        if date_range_settings is None:
+            return
+        date_from, date_to = date_range_settings
+        message_types = self._get_message_type_settings()
+        if message_types is None:
+            return
+        if len(chat_ids) > 1:
+            self._launch_multi_chat_worker("retry_failed", chat_ids, batch_size, pause_seconds, date_from, date_to, message_types)
+            return
+        chat_id = chat_ids[0]
         control = RunControl()
         self._launch_worker(
             "retry_failed",
@@ -670,6 +988,9 @@ class TelegramCleanupGUI:
             batch_size,
             pause_seconds,
             control=control,
+            date_from=date_from,
+            date_to=date_to,
+            message_types=message_types,
         )
 
     def _delete_local_db(self) -> None:
@@ -737,7 +1058,14 @@ class TelegramCleanupGUI:
         except Exception as exc:
             self._show_error(str(exc))
 
-    def _launch_worker(self, action: str, func: Callable[..., Any], *args: Any, control: RunControl | None = None) -> None:
+    def _launch_worker(
+        self,
+        action: str,
+        func: Callable[..., Any],
+        *args: Any,
+        control: RunControl | None = None,
+        **kwargs: Any,
+    ) -> None:
         if self.active_worker and self.active_worker.is_alive():
             messagebox.showwarning(
                 self.translator.gettext("warning_title"),
@@ -753,7 +1081,7 @@ class TelegramCleanupGUI:
             result: Any = None
             error: str | None = None
             try:
-                result = func(*args)
+                result = func(*args, **kwargs)
             except Exception as exc:
                 error = str(exc)
             finally:
@@ -863,11 +1191,27 @@ class TelegramCleanupGUI:
             self._open_chat_selector()
             return
 
-        if action in {"index", "cleanup", "delete_indexed_only", "retry_failed"}:
+        if action in {
+            "index",
+            "cleanup",
+            "delete_indexed_only",
+            "retry_failed",
+            "multi_index",
+            "multi_cleanup",
+            "multi_delete_indexed_only",
+            "multi_retry_failed",
+        }:
             chat_id = result.get("chat_id")
             title = result.get("title")
             counts = result.get("counts", {})
             status = result.get("status")
+            if action and action.startswith("multi_"):
+                error_count = len(result.get("errors", []))
+                done_count = len(result.get("results", []))
+                self._append_log(
+                    f"Multi-chat {result.get('mode')} finished with status={status}; "
+                    f"processed={done_count}; errors={error_count}."
+                )
             self._render_progress(
                 {
                     "phase": status,
@@ -900,6 +1244,8 @@ class TelegramCleanupGUI:
                 title=result.get("title") or self.translator.gettext("none"),
                 chat_id=result.get("chat_id") or request["chat_id"],
                 indexed=known_count,
+                date_range=self._format_date_range_for_display(request.get("date_from"), request.get("date_to")),
+                message_types=self._format_message_types_for_display(request.get("message_types")),
             ),
         )
         if not confirmed:
@@ -911,13 +1257,189 @@ class TelegramCleanupGUI:
                 request["chat_id"],
                 request["batch_size"],
                 request["pause_seconds"],
+                request.get("date_from"),
+                request.get("date_to"),
+                request.get("message_types"),
             )
         else:
             self._launch_cleanup_worker(
                 request["chat_id"],
                 request["batch_size"],
                 request["pause_seconds"],
+                request.get("date_from"),
+                request.get("date_to"),
+                request.get("message_types"),
             )
+
+    def _show_resume_prompt_if_needed(self) -> None:
+        if self.active_worker and self.active_worker.is_alive():
+            self.root.after(500, self._show_resume_prompt_if_needed)
+            return
+        if self.resume_prompt_window and self.resume_prompt_window.winfo_exists():
+            return
+
+        try:
+            candidates = self.core.storage.get_resume_candidates(limit=1)
+        except Exception as exc:
+            self._append_log(f"Unable to check local resume state: {exc}")
+            return
+        if not candidates:
+            return
+
+        self.resume_candidate = candidates[0]
+        self._open_resume_prompt(self.resume_candidate)
+
+    def _open_resume_prompt(self, candidate: dict[str, Any]) -> None:
+        chat_id = str(candidate.get("chat_id") or "")
+        if not chat_id:
+            return
+
+        window = tk.Toplevel(self.root)
+        self.resume_prompt_window = window
+        window.title(self.translator.gettext("resume_prompt_title"))
+        window.geometry("520x360")
+        window.minsize(480, 320)
+        window.transient(self.root)
+        window.grab_set()
+        window.lift()
+        try:
+            window.attributes("-topmost", True)
+            window.after(500, lambda: window.attributes("-topmost", False))
+        except tk.TclError:
+            pass
+        window.columnconfigure(0, weight=1)
+        window.protocol("WM_DELETE_WINDOW", self._dismiss_resume_prompt)
+
+        content = ttk.Frame(window)
+        content.grid(row=0, column=0, sticky="nsew", padx=16, pady=16)
+        content.columnconfigure(0, weight=1)
+
+        title_label = ttk.Label(
+            content,
+            text=self.translator.gettext("resume_prompt_heading"),
+            font=("TkDefaultFont", 11, "bold"),
+            wraplength=460,
+            justify="left",
+        )
+        title_label.grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        message_label = ttk.Label(
+            content,
+            text=self.translator.gettext(
+                "resume_prompt_message",
+                title=str(candidate.get("title") or self.translator.gettext("none")),
+                chat_id=chat_id,
+                phase=str(candidate.get("recent_phase") or candidate.get("status") or self.translator.gettext("none")),
+                indexed=int(candidate.get("indexed") or 0),
+                deleted=int(candidate.get("deleted") or 0),
+                pending=int(candidate.get("pending") or 0),
+                failed=int(candidate.get("failed") or 0),
+                last_update=str(candidate.get("last_update") or candidate.get("chat_updated_at") or self.translator.gettext("none")),
+            ),
+            wraplength=460,
+            justify="left",
+        )
+        message_label.grid(row=1, column=0, sticky="ew", pady=(0, 16))
+
+        button_frame = ttk.Frame(content)
+        button_frame.grid(row=2, column=0, sticky="ew")
+        for column in range(3):
+            button_frame.columnconfigure(column, weight=1)
+
+        continue_button = ttk.Button(
+            button_frame,
+            text=self.translator.gettext("resume_continue"),
+            command=self._continue_resume_candidate,
+        )
+        review_button = ttk.Button(
+            button_frame,
+            text=self.translator.gettext("resume_review"),
+            command=self._review_resume_candidate,
+        )
+        dismiss_button = ttk.Button(
+            button_frame,
+            text=self.translator.gettext("resume_dismiss"),
+            command=self._dismiss_resume_prompt,
+        )
+        continue_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        review_button.grid(row=0, column=1, sticky="ew", padx=6)
+        dismiss_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
+
+        self._apply_theme()
+        window.focus_force()
+
+    def _review_resume_candidate(self) -> None:
+        candidate = self.resume_candidate or {}
+        chat_id = str(candidate.get("chat_id") or "")
+        if chat_id:
+            self.chat_id_var.set(chat_id)
+            self._load_local_chat_state()
+        self._dismiss_resume_prompt()
+
+    def _continue_resume_candidate(self) -> None:
+        candidate = self.resume_candidate or {}
+        chat_id = str(candidate.get("chat_id") or "")
+        if not chat_id:
+            self._dismiss_resume_prompt()
+            return
+
+        self.chat_id_var.set(chat_id)
+        self._load_local_chat_state()
+        self._dismiss_resume_prompt()
+
+        if self.active_worker and self.active_worker.is_alive():
+            self.root.after(500, self._continue_resume_candidate)
+            return
+
+        batch_size, pause_seconds = self._get_batch_settings_or_defaults()
+        date_from = self.date_from_var.get().strip() or "first"
+        date_to = self.date_to_var.get().strip() or "last"
+        message_types = self._get_message_type_settings()
+        if message_types is None:
+            return
+        action = self._get_resume_action(candidate)
+        self._append_log(f"Continuing saved progress for chat_id={chat_id} using action={action}.")
+        if action == "index":
+            self._launch_index_worker(chat_id, date_from, date_to, message_types)
+        elif action == "delete_indexed_only":
+            self._launch_delete_indexed_only_worker(chat_id, batch_size, pause_seconds, date_from, date_to, message_types)
+        elif action == "retry_failed":
+            control = RunControl()
+            self._launch_worker(
+                "retry_failed",
+                self.core.retry_failed,
+                chat_id,
+                batch_size,
+                pause_seconds,
+                control=control,
+                date_from=date_from,
+                date_to=date_to,
+                message_types=message_types,
+            )
+        else:
+            self._launch_cleanup_worker(chat_id, batch_size, pause_seconds, date_from, date_to, message_types)
+
+    def _dismiss_resume_prompt(self) -> None:
+        if self.resume_prompt_window and self.resume_prompt_window.winfo_exists():
+            try:
+                self.resume_prompt_window.grab_release()
+            except tk.TclError:
+                pass
+            self.resume_prompt_window.destroy()
+        self.resume_prompt_window = None
+
+    def _get_resume_action(self, candidate: dict[str, Any]) -> str:
+        phase = str(candidate.get("recent_phase") or "")
+        pending = int(candidate.get("pending") or 0)
+        failed = int(candidate.get("failed") or 0)
+        index_complete = bool(candidate.get("index_complete"))
+        if phase == "index" and not index_complete:
+            return "index"
+        if phase == "delete_indexed_only" and pending > 0:
+            return "delete_indexed_only"
+        if phase == "retry_failed" and failed > 0:
+            return "retry_failed"
+        return "cleanup"
 
     def _open_chat_selector(self) -> None:
         if self.chat_selector_window and self.chat_selector_window.winfo_exists():
@@ -959,20 +1481,24 @@ class TelegramCleanupGUI:
 
         self.chat_selector_tree = ttk.Treeview(
             tree_frame,
-            columns=("title", "id", "username", "type"),
+            columns=("selected", "title", "id", "username", "type"),
             show="headings",
             style="ChatSelector.Treeview",
         )
+        self.chat_selector_tree.heading("selected", text=self.translator.gettext("chat_selected_column"))
         self.chat_selector_tree.heading("title", text=self.translator.gettext("chat_title_column"))
         self.chat_selector_tree.heading("id", text=self.translator.gettext("chat_id_column"))
         self.chat_selector_tree.heading("username", text=self.translator.gettext("chat_username_column"))
         self.chat_selector_tree.heading("type", text=self.translator.gettext("chat_type_column"))
+        self.chat_selector_tree.column("selected", width=72, anchor="center", stretch=False)
         self.chat_selector_tree.column("title", width=330, anchor="w")
         self.chat_selector_tree.column("id", width=170, anchor="w")
         self.chat_selector_tree.column("username", width=170, anchor="w")
         self.chat_selector_tree.column("type", width=120, anchor="w")
         self.chat_selector_tree.grid(row=0, column=0, sticky="nsew")
-        self.chat_selector_tree.bind("<Double-1>", lambda _event: self._use_selected_chat())
+        self.chat_selector_tree.bind("<Button-1>", self._on_chat_selector_click)
+        self.chat_selector_tree.bind("<Double-1>", self._on_chat_selector_double_click)
+        self.chat_selector_tree.bind("<space>", self._toggle_focused_chat_selector_row)
 
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.chat_selector_tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -981,6 +1507,14 @@ class TelegramCleanupGUI:
         bottom_frame = ttk.Frame(window)
         bottom_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(8, 12))
         bottom_frame.columnconfigure(0, weight=1)
+
+        self.chat_selector_all_check = ttk.Checkbutton(
+            bottom_frame,
+            variable=self.chat_selector_all_var,
+            command=self._on_chat_selector_all_toggled,
+        )
+        self.chat_selector_all_check.grid(row=0, column=0, sticky="w")
+        self._register_widget_text(self.chat_selector_all_check, "select_all_chats")
 
         self.chat_selector_use_button = ttk.Button(bottom_frame, command=self._use_selected_chat)
         self.chat_selector_use_button.grid(row=0, column=1, sticky="e")
@@ -1018,13 +1552,15 @@ class TelegramCleanupGUI:
             self.chat_selector_tree.delete(item_id)
 
         for index, dialog in enumerate(self.chat_selector_filtered_dialogs):
+            chat_id = str(dialog.get("id") or "")
             self.chat_selector_tree.insert(
                 "",
                 "end",
                 iid=f"dialog-{index}",
                 values=(
+                    "[x]" if chat_id in self.chat_selector_selected_ids else "[ ]",
                     str(dialog.get("title") or ""),
-                    str(dialog.get("id") or ""),
+                    chat_id,
                     str(dialog.get("username") or ""),
                     str(dialog.get("type") or ""),
                 ),
@@ -1034,26 +1570,129 @@ class TelegramCleanupGUI:
         if children:
             self.chat_selector_tree.selection_set(children[0])
             self.chat_selector_tree.focus(children[0])
+        self._sync_all_chats_checkbox()
 
     def _use_selected_chat(self) -> None:
         if not self.chat_selector_window or not self.chat_selector_window.winfo_exists():
             return
 
-        selection = self.chat_selector_tree.selection()
-        if not selection:
+        selected_ids = self._get_checked_chat_ids()
+        if not selected_ids:
+            selection = self.chat_selector_tree.selection()
+            if selection:
+                values = self.chat_selector_tree.item(selection[0], "values")
+                selected_ids = [str(values[2])]
+                self.chat_selector_selected_ids.add(str(values[2]))
+                self._capture_selected_chat_title(str(values[2]), str(values[1]))
+
+        if not selected_ids:
             messagebox.showwarning(
                 self.translator.gettext("warning_title"),
                 self.translator.gettext("no_chat_selected"),
             )
             return
 
-        values = self.chat_selector_tree.item(selection[0], "values")
-        title = str(values[0])
-        chat_id = str(values[1])
-        self.chat_id_var.set(chat_id)
+        self.selected_chat_ids = selected_ids
+        self.chat_id_var.set(self._format_chat_ids_for_entry(selected_ids))
         self._load_local_chat_state()
-        self._append_log(self.translator.gettext("chat_selected_message", title=title, chat_id=chat_id))
+        if len(selected_ids) == 1:
+            chat_id = selected_ids[0]
+            title = self.selected_chat_titles.get(chat_id, self.translator.gettext("none"))
+            self._append_log(self.translator.gettext("chat_selected_message", title=title, chat_id=chat_id))
+        else:
+            self._append_log(self.translator.gettext("multi_chat_selected_message", count=len(selected_ids)))
         self._close_chat_selector()
+
+    def _on_chat_selector_click(self, event: tk.Event) -> None:
+        row_id = self.chat_selector_tree.identify_row(event.y)
+        if not row_id:
+            return
+        column = self.chat_selector_tree.identify_column(event.x)
+        if column == "#1":
+            self._toggle_chat_selector_row(row_id)
+            return "break"
+
+    def _on_chat_selector_double_click(self, event: tk.Event) -> None:
+        row_id = self.chat_selector_tree.identify_row(event.y)
+        if row_id:
+            self._use_selected_chat()
+            return "break"
+
+    def _toggle_focused_chat_selector_row(self, _event: tk.Event) -> str:
+        row_id = self.chat_selector_tree.focus()
+        if row_id:
+            self._toggle_chat_selector_row(row_id)
+        return "break"
+
+    def _toggle_chat_selector_row(self, row_id: str) -> None:
+        values = list(self.chat_selector_tree.item(row_id, "values"))
+        if len(values) < 3:
+            return
+        chat_id = str(values[2])
+        title = str(values[1])
+        if chat_id in self.chat_selector_selected_ids:
+            self.chat_selector_selected_ids.remove(chat_id)
+            values[0] = "[ ]"
+        else:
+            self.chat_selector_selected_ids.add(chat_id)
+            self._capture_selected_chat_title(chat_id, title)
+            values[0] = "[x]"
+        self.chat_selector_tree.item(row_id, values=values)
+        self._sync_all_chats_checkbox()
+
+    def _on_chat_selector_all_toggled(self) -> None:
+        if self.chat_selector_all_var.get():
+            if not self.chat_selector_dialogs:
+                self.chat_selector_all_var.set(False)
+                messagebox.showwarning(
+                    self.translator.gettext("warning_title"),
+                    self.translator.gettext("no_chat_selected"),
+                    parent=self.chat_selector_window,
+                )
+                return
+            if not self._confirm_select_all_chats():
+                self.chat_selector_all_var.set(False)
+                return
+            for dialog in self.chat_selector_dialogs:
+                chat_id = str(dialog.get("id") or "")
+                if not chat_id:
+                    continue
+                self.chat_selector_selected_ids.add(chat_id)
+                self._capture_selected_chat_title(chat_id, str(dialog.get("title") or ""))
+            self._append_log(self.translator.gettext("all_chats_selected_message", count=len(self.chat_selector_selected_ids)))
+        else:
+            self.chat_selector_selected_ids.clear()
+        self._populate_chat_selector_tree()
+
+    def _confirm_select_all_chats(self) -> bool:
+        first_confirmed = messagebox.askyesno(
+            self.translator.gettext("all_chats_warning_title"),
+            self.translator.gettext("all_chats_warning_first", count=len(self.chat_selector_dialogs)),
+            parent=self.chat_selector_window,
+        )
+        if not first_confirmed:
+            return False
+        return messagebox.askyesno(
+            self.translator.gettext("all_chats_warning_title"),
+            self.translator.gettext("all_chats_warning_second", count=len(self.chat_selector_dialogs)),
+            parent=self.chat_selector_window,
+        )
+
+    def _sync_all_chats_checkbox(self) -> None:
+        loaded_ids = {str(dialog.get("id") or "") for dialog in self.chat_selector_dialogs if dialog.get("id")}
+        self.chat_selector_all_var.set(bool(loaded_ids) and loaded_ids.issubset(self.chat_selector_selected_ids))
+
+    def _get_checked_chat_ids(self) -> list[str]:
+        selected: list[str] = []
+        for dialog in self.chat_selector_dialogs:
+            chat_id = str(dialog.get("id") or "")
+            if chat_id and chat_id in self.chat_selector_selected_ids:
+                selected.append(chat_id)
+        return selected
+
+    def _capture_selected_chat_title(self, chat_id: str, title: str) -> None:
+        if chat_id:
+            self.selected_chat_titles[chat_id] = title
 
     def _open_qr_login_window(self) -> None:
         if self.qr_login_window and self.qr_login_window.winfo_exists():
@@ -1229,9 +1868,13 @@ class TelegramCleanupGUI:
             self.progress_bar.start(10)
 
     def _load_local_chat_state(self) -> None:
-        chat_id = self.chat_id_var.get().strip()
-        if not chat_id:
+        chat_ids = self._parse_chat_ids(self.chat_id_var.get())
+        if not chat_ids:
             return
+        if len(chat_ids) > 1:
+            self._render_multi_chat_selection_state(chat_ids)
+            return
+        chat_id = chat_ids[0]
         try:
             counts = self.core.storage.get_status_counts(chat_id)
             if counts.get("indexed", 0) or counts.get("title"):
@@ -1298,15 +1941,118 @@ class TelegramCleanupGUI:
     def _show_error(self, message: str) -> None:
         messagebox.showerror(self.translator.gettext("error_title"), message)
 
-    def _require_chat_id(self) -> str | None:
-        chat_id = self.chat_id_var.get().strip()
-        if chat_id:
-            return chat_id
+    def _parse_chat_ids(self, value: str) -> list[str]:
+        normalized = value.replace(";", ",").replace("\n", ",")
+        chat_ids: list[str] = []
+        seen: set[str] = set()
+        for item in normalized.split(","):
+            chat_id = item.strip()
+            if not chat_id or chat_id in seen:
+                continue
+            chat_ids.append(chat_id)
+            seen.add(chat_id)
+        return chat_ids
+
+    def _format_chat_ids_for_entry(self, chat_ids: list[str]) -> str:
+        return ", ".join(chat_ids)
+
+    def _require_chat_ids(self) -> list[str] | None:
+        chat_ids = self._parse_chat_ids(self.chat_id_var.get())
+        if chat_ids:
+            return chat_ids
         messagebox.showwarning(
             self.translator.gettext("warning_title"),
             self.translator.gettext("fill_required_fields"),
         )
         return None
+
+    def _require_chat_id(self) -> str | None:
+        chat_ids = self._require_chat_ids()
+        if chat_ids:
+            return chat_ids[0]
+        return None
+
+    def _confirm_multi_chat_deletion(
+        self,
+        chat_ids: list[str],
+        date_from: str | None,
+        date_to: str | None,
+        message_types: list[str] | None,
+    ) -> bool:
+        return messagebox.askyesno(
+            self.translator.gettext("confirm_cleanup_title"),
+            self.translator.gettext(
+                "confirm_multi_cleanup_message",
+                count=len(chat_ids),
+                date_range=self._format_date_range_for_display(date_from, date_to),
+                message_types=self._format_message_types_for_display(message_types),
+            ),
+        )
+
+    def _format_date_range_for_display(self, date_from: str | None, date_to: str | None) -> str:
+        return f"{date_from or 'first'} -> {date_to or 'last'}"
+
+    def _render_multi_chat_selection_state(self, chat_ids: list[str]) -> None:
+        self._render_progress(
+            {
+                "phase": "multi-selection",
+                "title": self.translator.gettext("multi_chat_title", count=len(chat_ids)),
+                "chat_id": self._format_chat_ids_for_entry(chat_ids),
+                "indexed": 0,
+                "deleted": 0,
+                "pending": 0,
+                "failed": 0,
+                "percentage": 0,
+                "speed_text": self.translator.gettext("calculating"),
+                "eta_text": self.translator.gettext("calculating"),
+                "batch_number": 0,
+                "flood_wait_seconds": None,
+            }
+        )
+
+    def _get_date_range_settings(self) -> tuple[str | None, str | None] | None:
+        date_from = self.date_from_var.get().strip() or "first"
+        date_to = self.date_to_var.get().strip() or "last"
+        try:
+            parse_message_date_range(date_from, date_to)
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return None
+        self.date_from_var.set(date_from)
+        self.date_to_var.set(date_to)
+        self.core.save_config({"date_from": date_from, "date_to": date_to})
+        return date_from, date_to
+
+    def _on_all_message_types_toggled(self) -> None:
+        enabled = self.all_message_types_var.get()
+        for variable in self.message_type_vars.values():
+            variable.set(enabled)
+
+    def _on_message_type_toggled(self) -> None:
+        selected = self._selected_message_types()
+        self.all_message_types_var.set(set(selected) == set(MESSAGE_TYPE_OPTIONS))
+
+    def _selected_message_types(self) -> list[str]:
+        return [
+            message_type
+            for message_type in MESSAGE_TYPE_OPTIONS
+            if self.message_type_vars[message_type].get()
+        ]
+
+    def _get_message_type_settings(self) -> list[str] | None:
+        selected = self._selected_message_types()
+        try:
+            parse_message_type_filter(selected)
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return None
+        self.core.save_config({"message_types": selected})
+        return selected
+
+    def _format_message_types_for_display(self, message_types: list[str] | None) -> str:
+        if not message_types or set(message_types) == set(MESSAGE_TYPE_OPTIONS):
+            return self.translator.gettext("message_type_all")
+        return ", ".join(self.translator.gettext(f"message_type_{message_type}") for message_type in message_types)
 
     def _get_batch_settings(self) -> tuple[int | None, float | None]:
         try:
@@ -1323,6 +2069,20 @@ class TelegramCleanupGUI:
             return None, None
         return batch_size, pause_seconds
 
+    def _get_batch_settings_or_defaults(self) -> tuple[int, float]:
+        try:
+            batch_size = int(self.batch_size_var.get().strip())
+            pause_seconds = float(self.pause_seconds_var.get().strip())
+        except ValueError:
+            self.batch_size_var.set("100")
+            self.pause_seconds_var.set("2")
+            return 100, 2.0
+        if batch_size <= 0 or pause_seconds < 0:
+            self.batch_size_var.set("100")
+            self.pause_seconds_var.set("2")
+            return 100, 2.0
+        return batch_size, pause_seconds
+
     def _update_button_states(self) -> None:
         is_busy = bool(self.active_worker and self.active_worker.is_alive())
         control_available = self.current_control is not None and self.active_action in {
@@ -1330,6 +2090,10 @@ class TelegramCleanupGUI:
             "cleanup",
             "delete_indexed_only",
             "retry_failed",
+            "multi_index",
+            "multi_cleanup",
+            "multi_delete_indexed_only",
+            "multi_retry_failed",
         }
 
         normal_buttons = [
@@ -1377,6 +2141,7 @@ class TelegramCleanupGUI:
                 "Stop requested. Wait for the current batch to finish, then close the window again.",
             )
             return
+        self._dismiss_resume_prompt()
         self.root.destroy()
 
 

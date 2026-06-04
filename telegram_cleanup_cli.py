@@ -7,6 +7,30 @@ import sys
 from telegram_cleanup_core import DB_FILE_NAME, TelegramCleanupCore, create_cli_event_printer
 
 
+def add_date_range_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--from-date",
+        default="first",
+        help="Start date/time, e.g. '2026-01-01 00:00'. Use 'first' for no lower bound.",
+    )
+    parser.add_argument(
+        "--to-date",
+        default="last",
+        help="End date/time, e.g. '2026-01-31 23:59'. Use 'last' for no upper bound.",
+    )
+
+
+def add_message_type_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--message-types",
+        default="all",
+        help=(
+            "Comma-separated message types to include, or 'all'. "
+            "Supported: text,links,photo,video,gif,voice,video_note,file,sticker,poll,other."
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Telegram Message Cleaner CLI")
     parser.add_argument("--db-file", default=DB_FILE_NAME, help="SQLite progress database file")
@@ -17,11 +41,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     index_parser = subparsers.add_parser("index", help="Index one chat")
     index_parser.add_argument("--chat-id", required=True, help="Telegram chat ID")
+    add_date_range_arguments(index_parser)
+    add_message_type_arguments(index_parser)
 
     delete_parser = subparsers.add_parser("delete", help="Index and delete pending messages")
     delete_parser.add_argument("--chat-id", required=True, help="Telegram chat ID")
     delete_parser.add_argument("--batch-size", type=int, default=100, help="Delete batch size")
     delete_parser.add_argument("--pause", type=float, default=2.0, help="Pause between batches in seconds")
+    add_date_range_arguments(delete_parser)
+    add_message_type_arguments(delete_parser)
 
     delete_indexed_parser = subparsers.add_parser(
         "delete-indexed",
@@ -30,11 +58,15 @@ def build_parser() -> argparse.ArgumentParser:
     delete_indexed_parser.add_argument("--chat-id", required=True, help="Telegram chat ID")
     delete_indexed_parser.add_argument("--batch-size", type=int, default=100, help="Delete batch size")
     delete_indexed_parser.add_argument("--pause", type=float, default=2.0, help="Pause between batches in seconds")
+    add_date_range_arguments(delete_indexed_parser)
+    add_message_type_arguments(delete_indexed_parser)
 
     retry_parser = subparsers.add_parser("retry-failed", help="Retry failed deletions for one chat")
     retry_parser.add_argument("--chat-id", required=True, help="Telegram chat ID")
     retry_parser.add_argument("--batch-size", type=int, default=100, help="Delete batch size")
     retry_parser.add_argument("--pause", type=float, default=2.0, help="Pause between batches in seconds")
+    add_date_range_arguments(retry_parser)
+    add_message_type_arguments(retry_parser)
 
     return parser
 
@@ -55,7 +87,12 @@ def main() -> int:
             return 0
 
         if args.command == "index":
-            result = core.index_messages(args.chat_id)
+            result = core.index_messages(
+                args.chat_id,
+                date_from=args.from_date,
+                date_to=args.to_date,
+                message_types=args.message_types,
+            )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
 
@@ -64,6 +101,9 @@ def main() -> int:
                 chat_input=args.chat_id,
                 batch_size=args.batch_size,
                 pause_seconds=args.pause,
+                date_from=args.from_date,
+                date_to=args.to_date,
+                message_types=args.message_types,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
@@ -73,6 +113,9 @@ def main() -> int:
                 chat_input=args.chat_id,
                 batch_size=args.batch_size,
                 pause_seconds=args.pause,
+                date_from=args.from_date,
+                date_to=args.to_date,
+                message_types=args.message_types,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
@@ -82,6 +125,9 @@ def main() -> int:
                 chat_input=args.chat_id,
                 batch_size=args.batch_size,
                 pause_seconds=args.pause,
+                date_from=args.from_date,
+                date_to=args.to_date,
+                message_types=args.message_types,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0

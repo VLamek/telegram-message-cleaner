@@ -10,6 +10,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import date, datetime, time as datetime_time, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -47,9 +48,23 @@ APP_NAME = "Telegram Message Cleaner"
 CONFIG_FILE_NAME = "telegram_message_cleaner_config.json"
 SESSION_FILE_STEM = "telegram_message_cleaner"
 DB_FILE_NAME = "telegram_message_cleaner.sqlite3"
+FAILED_DB_FILE_NAME = "telegram_message_cleaner_failed.sqlite3"
 DEV_DATA_DIR_NAME = "TelegramMessageCleaner"
 SUPPORTED_LANGUAGES = ("en", "ru")
 SUPPORTED_THEMES = ("Light", "Dark")
+MESSAGE_TYPE_OPTIONS = (
+    "text",
+    "links",
+    "photo",
+    "video",
+    "gif",
+    "voice",
+    "video_note",
+    "file",
+    "sticker",
+    "poll",
+    "other",
+)
 
 EventCallback = Callable[[dict[str, Any]], None]
 
@@ -110,6 +125,120 @@ def safe_sleep_chunks(duration_seconds: float) -> list[float]:
         chunks.append(chunk)
         remaining -= chunk
     return chunks
+
+
+@dataclass(frozen=True)
+class MessageDateRange:
+    start: datetime | None = None
+    end: datetime | None = None
+
+    @property
+    def is_bounded(self) -> bool:
+        return self.start is not None or self.end is not None
+
+    @property
+    def start_iso(self) -> str | None:
+        return self.start.isoformat() if self.start else None
+
+    @property
+    def end_iso(self) -> str | None:
+        return self.end.isoformat() if self.end else None
+
+    def contains(self, value: datetime | None) -> bool:
+        if value is None:
+            return not self.is_bounded
+        normalized = normalize_message_datetime(value)
+        if self.start and normalized < self.start:
+            return False
+        if self.end and normalized > self.end:
+            return False
+        return True
+
+
+@dataclass(frozen=True)
+class MessageTypeFilter:
+    selected: frozenset[str] = frozenset(MESSAGE_TYPE_OPTIONS)
+
+    @property
+    def is_all(self) -> bool:
+        return self.selected == frozenset(MESSAGE_TYPE_OPTIONS)
+
+    @property
+    def storage_filter(self) -> tuple[str, ...] | None:
+        return None if self.is_all else tuple(sorted(self.selected))
+
+    def contains(self, message_type: str) -> bool:
+        return message_type in self.selected
+
+
+def parse_message_type_filter(value: str | Iterable[str] | None = None) -> MessageTypeFilter:
+    if value is None:
+        return MessageTypeFilter()
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.replace(";", ",").split(",")]
+    else:
+        raw_items = [str(item).strip() for item in value]
+
+    items = [item for item in raw_items if item]
+    if not items or any(item.lower() == "all" for item in items):
+        return MessageTypeFilter()
+
+    selected = frozenset(item for item in items if item in MESSAGE_TYPE_OPTIONS)
+    unknown = sorted(set(items) - set(MESSAGE_TYPE_OPTIONS))
+    if unknown:
+        raise ValueError(f"Unsupported message type(s): {', '.join(unknown)}")
+    if not selected:
+        raise ValueError("Select at least one message type.")
+    return MessageTypeFilter(selected=selected)
+
+
+def normalize_message_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        local_tz = datetime.now().astimezone().tzinfo
+        value = value.replace(tzinfo=local_tz)
+    return value.astimezone(timezone.utc).replace(microsecond=0)
+
+
+def parse_message_datetime(value: str | None, *, is_end: bool = False) -> datetime | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    if text.lower() in {"first", "earliest", "start", "beginning", "last", "latest", "end"}:
+        return None
+
+    normalized = text.replace("T", " ")
+    parsed: datetime
+    if len(normalized) == 10 and normalized[4] == "-" and normalized[7] == "-":
+        try:
+            parsed_date = date.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError("Date/time must use YYYY-MM-DD HH:MM or ISO format.") from exc
+        parsed = datetime.combine(
+            parsed_date,
+            datetime_time(23, 59, 59) if is_end else datetime_time(0, 0, 0),
+        )
+        return normalize_message_datetime(parsed)
+
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            parsed_date = date.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError("Date/time must use YYYY-MM-DD HH:MM or ISO format.") from exc
+        parsed = datetime.combine(
+            parsed_date,
+            datetime_time(23, 59, 59) if is_end else datetime_time(0, 0, 0),
+        )
+    return normalize_message_datetime(parsed)
+
+
+def parse_message_date_range(date_from: str | None = None, date_to: str | None = None) -> MessageDateRange:
+    start = parse_message_datetime(date_from, is_end=False)
+    end = parse_message_datetime(date_to, is_end=True)
+    if start and end and start > end:
+        raise ValueError("Date/time range is invalid: From must be earlier than To.")
+    return MessageDateRange(start=start, end=end)
 
 
 @dataclass
@@ -208,7 +337,7 @@ class TelegramCleanupCore:
         self.config = self.config_store.load()
         self.logger, self.log_dir = setup_app_logger(self.data_dir)
         self._db_file_override = db_file_override
-        self.storage = ProgressStorage(self.get_database_path())
+        self.storage = ProgressStorage(self.get_database_path(), self.get_failed_database_path())
         self._pending_phone_number: str | None = None
         self._pending_phone_code_hash: str | None = None
         self._ensure_git_protection_for_local_files()
@@ -218,7 +347,7 @@ class TelegramCleanupCore:
 
     def reload_config(self) -> dict[str, Any]:
         self.config = self.config_store.load()
-        self.storage = ProgressStorage(self.get_database_path())
+        self.storage = ProgressStorage(self.get_database_path(), self.get_failed_database_path())
         self._ensure_git_protection_for_local_files()
         return self.get_config()
 
@@ -227,7 +356,7 @@ class TelegramCleanupCore:
         data.update(updates)
         self.config_store.save(data)
         self.config = data
-        self.storage = ProgressStorage(self.get_database_path())
+        self.storage = ProgressStorage(self.get_database_path(), self.get_failed_database_path())
         self._ensure_git_protection_for_local_files()
         return self.get_config()
 
@@ -264,7 +393,7 @@ class TelegramCleanupCore:
             self._db_file_override = None
         else:
             self._db_file_override = db_file
-            self.storage = ProgressStorage(self.get_database_path())
+            self.storage = ProgressStorage(self.get_database_path(), self.get_failed_database_path())
         return self.get_database_path()
 
     def get_database_path(self) -> Path:
@@ -273,6 +402,9 @@ class TelegramCleanupCore:
         if not candidate.is_absolute():
             candidate = self.data_dir / candidate
         return candidate.resolve()
+
+    def get_failed_database_path(self) -> Path:
+        return self.get_database_path().with_name(FAILED_DB_FILE_NAME).resolve()
 
     def get_config_path(self) -> Path:
         return self.config_store.config_path.resolve()
@@ -284,10 +416,13 @@ class TelegramCleanupCore:
         db_path = self.get_database_path()
         wal_path = db_path.with_suffix(f"{db_path.suffix}-wal")
         shm_path = db_path.with_suffix(f"{db_path.suffix}-shm")
-        for path in (db_path, wal_path, shm_path):
+        failed_db_path = self.get_failed_database_path()
+        failed_wal_path = failed_db_path.with_suffix(f"{failed_db_path.suffix}-wal")
+        failed_shm_path = failed_db_path.with_suffix(f"{failed_db_path.suffix}-shm")
+        for path in (db_path, wal_path, shm_path, failed_db_path, failed_wal_path, failed_shm_path):
             if path.exists():
                 path.unlink()
-        self.storage = ProgressStorage(db_path)
+        self.storage = ProgressStorage(db_path, failed_db_path)
         self._log("info", f"Deleted local progress database: {db_path}")
 
     def get_auth_status(self) -> dict[str, Any]:
@@ -314,8 +449,17 @@ class TelegramCleanupCore:
     def get_chat_overview(self, chat_input: str) -> dict[str, Any]:
         return asyncio.run(self._get_chat_overview_async(chat_input))
 
-    def index_messages(self, chat_input: str, control: RunControl | None = None) -> dict[str, Any]:
-        return asyncio.run(self._index_messages_async(chat_input, control or RunControl()))
+    def index_messages(
+        self,
+        chat_input: str,
+        control: RunControl | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        message_types: str | Iterable[str] | None = None,
+    ) -> dict[str, Any]:
+        date_range = parse_message_date_range(date_from, date_to)
+        type_filter = parse_message_type_filter(message_types)
+        return asyncio.run(self._index_messages_async(chat_input, control or RunControl(), date_range, type_filter))
 
     def start_cleanup(
         self,
@@ -323,13 +467,20 @@ class TelegramCleanupCore:
         batch_size: int = 100,
         pause_seconds: float = 2.0,
         control: RunControl | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        message_types: str | Iterable[str] | None = None,
     ) -> dict[str, Any]:
+        date_range = parse_message_date_range(date_from, date_to)
+        type_filter = parse_message_type_filter(message_types)
         return asyncio.run(
             self._start_cleanup_async(
                 chat_input=chat_input,
                 batch_size=batch_size,
                 pause_seconds=pause_seconds,
                 control=control or RunControl(),
+                date_range=date_range,
+                type_filter=type_filter,
             )
         )
 
@@ -339,13 +490,20 @@ class TelegramCleanupCore:
         batch_size: int = 100,
         pause_seconds: float = 2.0,
         control: RunControl | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        message_types: str | Iterable[str] | None = None,
     ) -> dict[str, Any]:
+        date_range = parse_message_date_range(date_from, date_to)
+        type_filter = parse_message_type_filter(message_types)
         return asyncio.run(
             self._delete_indexed_only_async(
                 chat_input=chat_input,
                 batch_size=batch_size,
                 pause_seconds=pause_seconds,
                 control=control or RunControl(),
+                date_range=date_range,
+                type_filter=type_filter,
             )
         )
 
@@ -355,13 +513,20 @@ class TelegramCleanupCore:
         batch_size: int = 100,
         pause_seconds: float = 2.0,
         control: RunControl | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        message_types: str | Iterable[str] | None = None,
     ) -> dict[str, Any]:
+        date_range = parse_message_date_range(date_from, date_to)
+        type_filter = parse_message_type_filter(message_types)
         return asyncio.run(
             self._retry_failed_async(
                 chat_input=chat_input,
                 batch_size=batch_size,
                 pause_seconds=pause_seconds,
                 control=control or RunControl(),
+                date_range=date_range,
+                type_filter=type_filter,
             )
         )
 
@@ -441,6 +606,9 @@ class TelegramCleanupCore:
             self.get_database_path(),
             self.get_database_path().with_suffix(f"{self.get_database_path().suffix}-wal"),
             self.get_database_path().with_suffix(f"{self.get_database_path().suffix}-shm"),
+            self.get_failed_database_path(),
+            self.get_failed_database_path().with_suffix(f"{self.get_failed_database_path().suffix}-wal"),
+            self.get_failed_database_path().with_suffix(f"{self.get_failed_database_path().suffix}-shm"),
             self.log_dir,
         ]
 
@@ -476,6 +644,9 @@ class TelegramCleanupCore:
             self.app_dir / DB_FILE_NAME,
             self.app_dir / f"{DB_FILE_NAME}-wal",
             self.app_dir / f"{DB_FILE_NAME}-shm",
+            self.app_dir / FAILED_DB_FILE_NAME,
+            self.app_dir / f"{FAILED_DB_FILE_NAME}-wal",
+            self.app_dir / f"{FAILED_DB_FILE_NAME}-shm",
             self.app_dir / "TelegramMessageCleaner_Logs",
         ]
 
@@ -801,7 +972,13 @@ class TelegramCleanupCore:
             self._emit("chat_overview", overview=overview)
             return overview
 
-    async def _index_messages_async(self, chat_input: str, control: RunControl) -> dict[str, Any]:
+    async def _index_messages_async(
+        self,
+        chat_input: str,
+        control: RunControl,
+        date_range: MessageDateRange,
+        type_filter: MessageTypeFilter,
+    ) -> dict[str, Any]:
         control.reset()
         async with self._connected_client() as client:
             if not await client.is_user_authorized():
@@ -824,8 +1001,8 @@ class TelegramCleanupCore:
                 newest_indexed_message_id=index_state.get("newest_indexed_message_id"),
             )
             try:
-                indexed_count = await self._run_indexing(client, me.id, entity, chat_id, title, control, run_id)
-                final_counts = self._emit_progress(chat_id, title, "indexing-complete", run_id=run_id)
+                indexed_count = await self._run_indexing(client, me.id, entity, chat_id, title, control, run_id, date_range, type_filter)
+                final_counts = self._emit_progress(chat_id, title, "indexing-complete", run_id=run_id, date_range=date_range, type_filter=type_filter)
                 final_status = control.terminal_status() or "completed"
                 self.storage.update_chat_status(chat_id, final_status, indexed=bool(final_counts.get("index_complete")))
                 self.storage.finish_run(run_id, final_status, final_counts)
@@ -848,6 +1025,8 @@ class TelegramCleanupCore:
         batch_size: int,
         pause_seconds: float,
         control: RunControl,
+        date_range: MessageDateRange,
+        type_filter: MessageTypeFilter,
     ) -> dict[str, Any]:
         control.reset()
         async with self._connected_client() as client:
@@ -863,10 +1042,10 @@ class TelegramCleanupCore:
             run_id = self.storage.create_run(chat_id, "cleanup")
             self._log("info", "Cleanup started.", chat_id=chat_id, title=title, batch_size=batch_size, pause_seconds=pause_seconds)
             try:
-                await self._run_indexing(client, me.id, entity, chat_id, title, control, run_id)
+                await self._run_indexing(client, me.id, entity, chat_id, title, control, run_id, date_range, type_filter)
                 terminal = control.terminal_status()
                 if terminal:
-                    counts = self._emit_progress(chat_id, title, terminal, run_id=run_id)
+                    counts = self._emit_progress(chat_id, title, terminal, run_id=run_id, date_range=date_range, type_filter=type_filter)
                     self.storage.update_chat_status(chat_id, terminal, indexed=bool(counts.get("index_complete")))
                     self.storage.finish_run(run_id, terminal, counts)
                     self._log("info", f"Cleanup {terminal} after indexing.", chat_id=chat_id, title=title)
@@ -883,6 +1062,8 @@ class TelegramCleanupCore:
                     pause_seconds=pause_seconds,
                     control=control,
                     run_id=run_id,
+                    date_range=date_range,
+                    type_filter=type_filter,
                 )
                 terminal = control.terminal_status()
                 if terminal:
@@ -895,6 +1076,8 @@ class TelegramCleanupCore:
                 self.storage.update_chat_status(chat_id, final_status, indexed=True)
                 self.storage.finish_run(run_id, final_status, counts)
                 self._log("info", "Cleanup finished.", chat_id=chat_id, title=title, status=final_status)
+                self.storage.clear_chat_workspace(chat_id)
+                self._log("info", "Main progress workspace cleared after cleanup.", chat_id=chat_id, title=title)
                 return {"status": final_status, "chat_id": chat_id, "title": title, "counts": counts}
             except Exception:
                 error_counts = self.storage.get_status_counts(chat_id)
@@ -908,6 +1091,8 @@ class TelegramCleanupCore:
         batch_size: int,
         pause_seconds: float,
         control: RunControl,
+        date_range: MessageDateRange,
+        type_filter: MessageTypeFilter,
     ) -> dict[str, Any]:
         control.reset()
         async with self._connected_client() as client:
@@ -921,7 +1106,12 @@ class TelegramCleanupCore:
             chat_type = self._detect_chat_type(entity)
             self.storage.upsert_chat(chat_id, title, username, chat_type, "deleting-indexed-only")
             run_id = self.storage.create_run(chat_id, "delete_indexed_only")
-            counts_before = self.storage.get_status_counts(chat_id)
+            counts_before = self.storage.get_status_counts(
+                chat_id,
+                date_range.start_iso,
+                date_range.end_iso,
+                type_filter.storage_filter,
+            )
             self._log(
                 "info",
                 "Deleting already indexed pending messages without a new indexing pass.",
@@ -941,6 +1131,8 @@ class TelegramCleanupCore:
                     pause_seconds=pause_seconds,
                     control=control,
                     run_id=run_id,
+                    date_range=date_range,
+                    type_filter=type_filter,
                 )
                 terminal = control.terminal_status()
                 if terminal:
@@ -960,6 +1152,9 @@ class TelegramCleanupCore:
                 self.storage.update_chat_status(chat_id, final_status, indexed=index_complete)
                 self.storage.finish_run(run_id, final_status, counts)
                 self._log("info", "Delete indexed only finished.", chat_id=chat_id, title=title, status=final_status)
+                if counts["pending"] == 0:
+                    self.storage.clear_chat_workspace(chat_id)
+                    self._log("info", "Main progress workspace cleared after delete indexed only.", chat_id=chat_id, title=title)
                 return {"status": final_status, "chat_id": chat_id, "title": title, "counts": counts}
             except Exception:
                 error_counts = self.storage.get_status_counts(chat_id)
@@ -973,6 +1168,8 @@ class TelegramCleanupCore:
         batch_size: int,
         pause_seconds: float,
         control: RunControl,
+        date_range: MessageDateRange,
+        type_filter: MessageTypeFilter,
     ) -> dict[str, Any]:
         control.reset()
         async with self._connected_client() as client:
@@ -982,9 +1179,17 @@ class TelegramCleanupCore:
             entity = await self._resolve_chat_entity(client, chat_input)
             chat_id = str(utils.get_peer_id(entity))
             title = self._get_entity_title(entity)
+            username = getattr(entity, "username", None)
+            chat_type = self._detect_chat_type(entity)
+            self.storage.upsert_chat(chat_id, title, username, chat_type, "retrying-failed")
             run_id = self.storage.create_run(chat_id, "retry_failed")
             self.storage.update_chat_status(chat_id, "retrying-failed", indexed=True)
-            self.storage.reset_failed_to_pending(chat_id)
+            self.storage.reset_failed_to_pending(
+                chat_id,
+                date_range.start_iso,
+                date_range.end_iso,
+                type_filter.storage_filter,
+            )
             self._log("info", "Retry failed started.", chat_id=chat_id, title=title)
             try:
                 counts = await self._run_delete_loop(
@@ -997,6 +1202,8 @@ class TelegramCleanupCore:
                     pause_seconds=pause_seconds,
                     control=control,
                     run_id=run_id,
+                    date_range=date_range,
+                    type_filter=type_filter,
                 )
                 terminal = control.terminal_status()
                 if terminal:
@@ -1009,6 +1216,8 @@ class TelegramCleanupCore:
                 self.storage.update_chat_status(chat_id, final_status, indexed=True)
                 self.storage.finish_run(run_id, final_status, counts)
                 self._log("info", "Retry failed finished.", chat_id=chat_id, title=title, status=final_status)
+                self.storage.clear_chat_workspace(chat_id)
+                self._log("info", "Main progress workspace cleared after retry failed.", chat_id=chat_id, title=title)
                 return {"status": final_status, "chat_id": chat_id, "title": title, "counts": counts}
             except Exception:
                 error_counts = self.storage.get_status_counts(chat_id)
@@ -1025,10 +1234,60 @@ class TelegramCleanupCore:
         title: str,
         control: RunControl,
         run_id: int,
+        date_range: MessageDateRange,
+        type_filter: MessageTypeFilter,
     ) -> int:
-        self._emit_progress(chat_id, title, "indexing")
+        self._emit_progress(chat_id, title, "indexing", date_range=date_range, type_filter=type_filter)
         state = self.storage.get_chat_index_state(chat_id)
         indexed_total = 0
+
+        if date_range.is_bounded or not type_filter.is_all:
+            self._log(
+                "info",
+                "Filtered indexing started.",
+                chat_id=chat_id,
+                title=title,
+                date_from=date_range.start_iso or "first",
+                date_to=date_range.end_iso or "last",
+                message_types="all" if type_filter.is_all else ",".join(sorted(type_filter.selected)),
+            )
+            indexed_total += await self._index_message_stream(
+                client=client,
+                entity=entity,
+                chat_id=chat_id,
+                title=title,
+                control=control,
+                run_id=run_id,
+                from_user=my_user_id,
+                update_newest=False,
+                update_resume_cursor=False,
+                phase_label="indexing-filtered",
+                date_range=date_range,
+                type_filter=type_filter,
+            )
+            if control.terminal_status():
+                self.storage.update_chat_status(chat_id, "indexing-interrupted", indexed=False)
+                return indexed_total
+            self.storage.update_chat_status(chat_id, "indexed-filtered", indexed=False)
+            counts = self._emit_progress(
+                chat_id,
+                title,
+                "indexing-filtered-complete",
+                run_id=run_id,
+                date_range=date_range,
+                type_filter=type_filter,
+            )
+            self._log(
+                "info",
+                "Filtered indexing complete.",
+                chat_id=chat_id,
+                title=title,
+                indexed=counts["indexed"],
+                date_from=date_range.start_iso or "first",
+                date_to=date_range.end_iso or "last",
+                message_types="all" if type_filter.is_all else ",".join(sorted(type_filter.selected)),
+            )
+            return indexed_total
 
         newest_message_id = self._as_int_or_none(state.get("newest_indexed_message_id"))
         resume_older_from = self._as_int_or_none(state.get("next_oldest_message_id"))
@@ -1047,11 +1306,13 @@ class TelegramCleanupCore:
                 update_newest=True,
                 update_resume_cursor=False,
                 phase_label="indexing-newer",
+                date_range=date_range,
+                type_filter=type_filter,
             )
             newest_message_id = self._as_int_or_none(self.storage.get_chat_index_state(chat_id).get("newest_indexed_message_id"))
 
         if control.terminal_status():
-            counts = self._emit_progress(chat_id, title, "indexing-interrupted")
+            counts = self._emit_progress(chat_id, title, "indexing-interrupted", date_range=date_range, type_filter=type_filter)
             self.storage.update_chat_status(chat_id, "indexing-interrupted", indexed=False)
             return indexed_total
 
@@ -1068,9 +1329,11 @@ class TelegramCleanupCore:
                 update_newest=newest_message_id is None,
                 update_resume_cursor=True,
                 phase_label="indexing-history",
+                date_range=date_range,
+                type_filter=type_filter,
             )
 
-        counts = self._emit_progress(chat_id, title, "indexing")
+        counts = self._emit_progress(chat_id, title, "indexing", date_range=date_range, type_filter=type_filter)
         current_state = self.storage.get_chat_index_state(chat_id)
         if control.terminal_status():
             self.storage.update_chat_status(chat_id, "indexing-interrupted", indexed=False)
@@ -1112,9 +1375,11 @@ class TelegramCleanupCore:
         update_newest: bool,
         update_resume_cursor: bool,
         phase_label: str,
+        date_range: MessageDateRange,
+        type_filter: MessageTypeFilter,
     ) -> int:
         found = 0
-        batch: list[tuple[int, str | None]] = []
+        batch: list[tuple[int, str | None, str | None]] = []
         current_newest = self._as_int_or_none(self.storage.get_chat_index_state(chat_id).get("newest_indexed_message_id"))
         current_oldest: int | None = None
 
@@ -1128,9 +1393,22 @@ class TelegramCleanupCore:
             if control.terminal_status():
                 break
 
+            raw_date = getattr(message, "date", None)
+            normalized_date = normalize_message_datetime(raw_date) if raw_date else None
+            if date_range.end and normalized_date and normalized_date > date_range.end:
+                continue
+            if date_range.start and normalized_date and normalized_date < date_range.start:
+                break
+            if not date_range.contains(normalized_date):
+                continue
+
+            message_type = self._detect_message_type(message)
+            if not type_filter.contains(message_type):
+                continue
+
             message_id = int(message.id)
-            message_date = message.date.isoformat() if getattr(message, "date", None) else None
-            batch.append((message_id, message_date))
+            message_date = normalized_date.isoformat() if normalized_date else None
+            batch.append((message_id, message_date, message_type))
             found += 1
             current_newest = message_id if current_newest is None else max(current_newest, message_id)
             current_oldest = message_id if current_oldest is None else min(current_oldest, message_id)
@@ -1145,7 +1423,7 @@ class TelegramCleanupCore:
                     state_kwargs["next_oldest_message_id"] = current_oldest
                     state_kwargs["index_complete"] = False
                 self.storage.update_chat_index_state(chat_id, **state_kwargs)
-                counts = self._emit_progress(chat_id, title, phase_label)
+                counts = self._emit_progress(chat_id, title, phase_label, date_range=date_range, type_filter=type_filter)
                 self.storage.set_run_status(run_id, "indexing", counts)
                 self._log("info", "Indexing progress.", chat_id=chat_id, title=title, indexed=counts["indexed"])
 
@@ -1169,6 +1447,43 @@ class TelegramCleanupCore:
 
         return found
 
+    def _detect_message_type(self, message: Any) -> str:
+        media = getattr(message, "media", None)
+        if isinstance(media, getattr(types, "MessageMediaPoll", ())):
+            return "poll"
+        if getattr(message, "sticker", None):
+            return "sticker"
+        if getattr(message, "gif", None):
+            return "gif"
+        if getattr(message, "voice", None):
+            return "voice"
+        if getattr(message, "video_note", None):
+            return "video_note"
+        if getattr(message, "video", None):
+            return "video"
+        if getattr(message, "photo", None):
+            return "photo"
+        if self._message_has_link(message):
+            return "links"
+        if getattr(message, "document", None):
+            return "file"
+        if getattr(message, "message", None):
+            return "text"
+        return "other"
+
+    def _message_has_link(self, message: Any) -> bool:
+        if getattr(message, "web_preview", None):
+            return True
+        url_entity_types = (
+            getattr(types, "MessageEntityUrl", None),
+            getattr(types, "MessageEntityTextUrl", None),
+            getattr(types, "MessageEntityEmail", None),
+        )
+        url_entity_types = tuple(entity_type for entity_type in url_entity_types if entity_type is not None)
+        if not url_entity_types:
+            return False
+        return any(isinstance(entity, url_entity_types) for entity in (getattr(message, "entities", None) or []))
+
     async def _run_delete_loop(
         self,
         client: TelegramClient,
@@ -1180,14 +1495,28 @@ class TelegramCleanupCore:
         pause_seconds: float,
         control: RunControl,
         run_id: int,
+        date_range: MessageDateRange,
+        type_filter: MessageTypeFilter,
     ) -> dict[str, Any]:
         batch_number = 0
         run_started_at = time.monotonic()
-        initial_counts = self.storage.get_status_counts(chat_id)
+        initial_counts = self.storage.get_status_counts(
+            chat_id,
+            date_range.start_iso,
+            date_range.end_iso,
+            type_filter.storage_filter,
+        )
         deleted_at_start = int(initial_counts["deleted"])
 
         while True:
-            current_ids = self.storage.get_message_ids_by_status(chat_id, source_status, limit=batch_size)
+            current_ids = self.storage.get_message_ids_by_status(
+                chat_id,
+                source_status,
+                limit=batch_size,
+                date_from=date_range.start_iso,
+                date_to=date_range.end_iso,
+                message_types=type_filter.storage_filter,
+            )
             if not current_ids:
                 break
 
@@ -1199,6 +1528,8 @@ class TelegramCleanupCore:
                 batch_number=batch_number,
                 run_started_at=run_started_at,
                 deleted_at_start=deleted_at_start,
+                date_range=date_range,
+                type_filter=type_filter,
             )
             try:
                 deleted_ids, remaining_ids = await self._delete_batch_with_verification(
@@ -1211,6 +1542,8 @@ class TelegramCleanupCore:
                     run_started_at=run_started_at,
                     deleted_at_start=deleted_at_start,
                     control=control,
+                    date_range=date_range,
+                    type_filter=type_filter,
                 )
 
                 recovered_ids: list[int] = []
@@ -1225,6 +1558,8 @@ class TelegramCleanupCore:
                         run_started_at=run_started_at,
                         deleted_at_start=deleted_at_start,
                         control=control,
+                        date_range=date_range,
+                        type_filter=type_filter,
                     )
                     remaining_ids = [message_id for message_id in remaining_ids if message_id not in recovered_ids]
 
@@ -1234,9 +1569,9 @@ class TelegramCleanupCore:
 
                 if remaining_ids:
                     error_message = "Telegram delete request completed, but the messages still exist after verification."
+                    dates = self.storage.get_message_dates(chat_id, remaining_ids)
                     self.storage.mark_messages_failed(chat_id, remaining_ids, error_message)
                     self.storage.record_failed_batch(chat_id, remaining_ids, "DeleteVerificationFailed", error_message)
-                    dates = self.storage.get_message_dates(chat_id, remaining_ids)
                     self._log(
                         "warning",
                         "Batch partially deleted. Some messages still exist after verification.",
@@ -1259,9 +1594,9 @@ class TelegramCleanupCore:
                     )
             except Exception as exc:
                 error_message = format_exception_message(exc)
+                dates = self.storage.get_message_dates(chat_id, current_ids)
                 self.storage.mark_messages_failed(chat_id, current_ids, error_message)
                 self.storage.record_failed_batch(chat_id, current_ids, exc.__class__.__name__, error_message)
-                dates = self.storage.get_message_dates(chat_id, current_ids)
                 self._log(
                     "error",
                     "Batch failed.",
@@ -1280,6 +1615,8 @@ class TelegramCleanupCore:
                 batch_number=batch_number,
                 run_started_at=run_started_at,
                 deleted_at_start=deleted_at_start,
+                date_range=date_range,
+                type_filter=type_filter,
             )
             self.storage.set_run_status(run_id, "running", counts)
 
@@ -1295,6 +1632,8 @@ class TelegramCleanupCore:
                 control,
                 run_started_at=run_started_at,
                 deleted_at_start=deleted_at_start,
+                date_range=date_range,
+                type_filter=type_filter,
             )
 
         final_counts = self._emit_progress(
@@ -1304,6 +1643,8 @@ class TelegramCleanupCore:
             batch_number=batch_number,
             run_started_at=run_started_at,
             deleted_at_start=deleted_at_start,
+            date_range=date_range,
+            type_filter=type_filter,
         )
         return final_counts
 
@@ -1318,6 +1659,8 @@ class TelegramCleanupCore:
         run_started_at: float,
         deleted_at_start: int,
         control: RunControl,
+        date_range: MessageDateRange,
+        type_filter: MessageTypeFilter,
     ) -> tuple[list[int], list[int]]:
         await self._delete_batch_with_flood_wait(
             client=client,
@@ -1329,6 +1672,8 @@ class TelegramCleanupCore:
             run_started_at=run_started_at,
             deleted_at_start=deleted_at_start,
             control=control,
+            date_range=date_range,
+            type_filter=type_filter,
         )
         return await self._verify_deleted_message_ids(client, entity, message_ids)
 
@@ -1343,6 +1688,8 @@ class TelegramCleanupCore:
         run_started_at: float,
         deleted_at_start: int,
         control: RunControl,
+        date_range: MessageDateRange,
+        type_filter: MessageTypeFilter,
     ) -> None:
         while True:
             try:
@@ -1367,6 +1714,8 @@ class TelegramCleanupCore:
                         run_started_at=run_started_at,
                         deleted_at_start=deleted_at_start,
                         flood_wait_seconds=remaining,
+                        date_range=date_range,
+                        type_filter=type_filter,
                     )
                     await asyncio.sleep(1)
                 continue
@@ -1401,6 +1750,8 @@ class TelegramCleanupCore:
         run_started_at: float,
         deleted_at_start: int,
         control: RunControl,
+        date_range: MessageDateRange,
+        type_filter: MessageTypeFilter,
     ) -> list[int]:
         recovered_ids: list[int] = []
         for message_id in message_ids:
@@ -1417,6 +1768,8 @@ class TelegramCleanupCore:
                     run_started_at=run_started_at,
                     deleted_at_start=deleted_at_start,
                     control=control,
+                    date_range=date_range,
+                    type_filter=type_filter,
                 )
                 if deleted_ids and not remaining_ids:
                     recovered_ids.extend(deleted_ids)
@@ -1449,6 +1802,8 @@ class TelegramCleanupCore:
         control: RunControl,
         run_started_at: float | None = None,
         deleted_at_start: int = 0,
+        date_range: MessageDateRange | None = None,
+        type_filter: MessageTypeFilter | None = None,
     ) -> None:
         if pause_seconds <= 0:
             return
@@ -1462,6 +1817,8 @@ class TelegramCleanupCore:
                 batch_number=batch_number,
                 run_started_at=run_started_at,
                 deleted_at_start=deleted_at_start,
+                date_range=date_range,
+                type_filter=type_filter,
             )
             await asyncio.sleep(chunk)
 
@@ -1475,8 +1832,17 @@ class TelegramCleanupCore:
         deleted_at_start: int = 0,
         flood_wait_seconds: int | None = None,
         run_id: int | None = None,
+        date_range: MessageDateRange | None = None,
+        type_filter: MessageTypeFilter | None = None,
     ) -> dict[str, Any]:
-        counts = self.storage.get_status_counts(chat_id)
+        active_range = date_range or MessageDateRange()
+        active_types = type_filter or MessageTypeFilter()
+        counts = self.storage.get_status_counts(
+            chat_id,
+            active_range.start_iso,
+            active_range.end_iso,
+            active_types.storage_filter,
+        )
         indexed = int(counts["indexed"])
         deleted = int(counts["deleted"])
         pending = int(counts["pending"])
@@ -1522,6 +1888,9 @@ class TelegramCleanupCore:
             "status": counts.get("status"),
             "note": note,
             "run_id": run_id,
+            "date_from": active_range.start_iso,
+            "date_to": active_range.end_iso,
+            "message_types": "all" if active_types.is_all else ",".join(sorted(active_types.selected)),
         }
         self._emit("progress", snapshot=snapshot)
         return snapshot

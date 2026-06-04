@@ -43,6 +43,7 @@ Expected files:
 - `telegram_message_cleaner_config.json`
 - `telegram_message_cleaner.session`
 - `telegram_message_cleaner.sqlite3`
+- `telegram_message_cleaner_failed.sqlite3`
 - `TelegramMessageCleaner_Logs/`
 
 ## Notes

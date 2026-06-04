@@ -14,7 +14,7 @@
 
 **Secondary user:** Another trusted person who receives the app and runs it locally on their own computer with their own Telegram account and credentials
 
-Telegram Message Cleaner is a local desktop application that lets a user delete all of their own messages from a selected Telegram group by entering one `chat_id`. The app authenticates the user through Telegram MTProto via Telethon, indexes all messages sent by the authenticated user in the selected chat, then deletes those messages in batches while showing progress, speed, ETA, logs, and recovery state.
+Telegram Message Cleaner is a local desktop application that lets a user delete all of their own messages from explicitly selected Telegram chats. The app authenticates the user through Telegram MTProto via Telethon, indexes all messages sent by the authenticated user in the selected chat or chats, then deletes those messages in batches while showing progress, speed, ETA, logs, and recovery state.
 
 The app is not a public App Store-style product. It is intended for personal use and trusted sharing.
 
@@ -28,8 +28,10 @@ The user should be able to:
 
 1. Launch the app by double-clicking an `.exe` file on Windows.
 2. Authorize their Telegram account inside the GUI.
-3. Enter one Telegram `chat_id`.
-4. Start cleanup.
+3. Enter one Telegram `chat_id` or explicitly select multiple chats in the GUI picker.
+4. Keep the default full-history date/time range or choose a custom `from` / `to` range.
+5. Keep all message types selected or choose specific message types.
+6. Start cleanup.
 5. Let the app autonomously delete all of their own messages from that chat.
 6. Track progress, remaining message count, speed, ETA, errors, and Telegram waiting periods.
 7. Stop, pause, close, or restart the app without losing progress.
@@ -42,8 +44,8 @@ The user should be able to:
 
 The app must not:
 
-1. Delete messages from all Telegram groups automatically.
-2. Search all groups and delete messages from them automatically.
+1. Delete messages from all Telegram groups automatically without explicit user selection and warnings.
+2. Search all groups and delete messages from them in the background.
 3. Delete messages from multiple groups simultaneously.
 4. Store message text.
 5. Upload Telegram data, session files, logs, message metadata, or credentials anywhere.
@@ -94,6 +96,8 @@ The app shows:
 
 - Authorized account label, for example: `Authorized as @username` or `Authorized as +phone`
 - Chat ID input
+- Date/time range inputs
+- Message type checkboxes
 - Start cleanup button
 - Index only button
 - Pause after current batch button
@@ -105,7 +109,7 @@ The app shows:
 - Stats panel
 - GUI log panel
 
-The user enters one `chat_id` and clicks Start cleanup.
+The user enters one `chat_id`, or selects multiple chats in the picker, chooses the date/time range and message types for the current run, and clicks Start cleanup.
 
 The app:
 
@@ -234,15 +238,21 @@ The app must never print or log:
 
 ## 5.2 Chat Selection
 
-The app works with exactly one explicitly entered `chat_id` per cleanup run.
+The app supports one explicitly entered `chat_id`, or multiple explicitly selected chats from the GUI picker, per cleanup run.
 
-The GUI must contain one Chat ID field.
+The GUI must contain one Chat ID field. When multiple chats are selected, the field may contain comma-separated `chat_id` values.
 
-The app must not provide a mode for deleting from every group.
+The app must not provide a silent one-click mode for deleting from every group.
 
 The app must not provide a mode for deleting from all dialogs.
 
-The app may provide a `List groups` button only to help the user find the correct `chat_id`.
+The app may provide a `List groups` button to help the user find and explicitly select chat IDs.
+
+The chat picker must allow selecting multiple chats with checkbox-style controls.
+
+The chat picker may provide an `All` checkbox. Enabling `All` must require two separate user confirmations before all loaded chats are selected.
+
+When multiple chats are selected, cleanup must process chats sequentially, one chat at a time. The app must not delete from multiple chats in parallel.
 
 `List groups` must output to the GUI log:
 
@@ -257,7 +267,7 @@ The app may provide a `List groups` button only to help the user find the correc
 
 ## 5.3 Message Scope
 
-The app must delete all message types sent by the authenticated user in the selected chat.
+The app must delete selected message types sent by the authenticated user in the selected chat and selected date/time range.
 
 This includes, where Telegram API permits deletion:
 
@@ -275,6 +285,31 @@ This includes, where Telegram API permits deletion:
 - media messages sent by the user
 
 The app deletes messages by message ID. It does not need to inspect or store message content.
+
+The default date/time range must cover the full available chat history:
+
+- from `first`
+- to `last`
+
+The GUI must allow custom date/time input for the current indexing/deletion run. Supported input should include `YYYY-MM-DD HH:MM`; date-only input may be accepted as a convenience.
+
+The GUI must allow choosing message types for the current indexing/deletion run.
+
+By default, all message types must be selected.
+
+Supported message type filters should include:
+
+- text
+- links
+- photos
+- videos
+- GIFs
+- voice messages
+- video messages / circles
+- files
+- stickers
+- polls
+- other message records
 
 The app should use Telethon message iteration filtered by the authenticated user.
 
@@ -1328,7 +1363,7 @@ The app is acceptable when:
 22. It supports a simple light/dark theme.
 23. Its dark theme is readable and not blindingly bright, without requiring advanced styling.
 24. It has README and build instructions.
-25. It does not implement deletion across all groups.
+25. It does not implement silent deletion across all groups; selecting all loaded chats requires explicit UI selection and two warnings.
 26. It does not upload data anywhere except normal Telegram API calls.
 
 ---

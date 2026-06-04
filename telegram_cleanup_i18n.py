@@ -24,17 +24,54 @@ TRANSLATIONS = {
         "chat_id": "Chat ID",
         "batch_size": "Batch size",
         "pause_between_batches": "Pause between batches (sec)",
+        "date_from": "From date/time",
+        "date_to": "To date/time",
+        "date_format_hint": "Use YYYY-MM-DD HH:MM, or first/last",
+        "message_types": "Message types",
+        "message_type_all": "All message types",
+        "message_type_text": "Text",
+        "message_type_links": "Links",
+        "message_type_photo": "Photos",
+        "message_type_video": "Videos",
+        "message_type_gif": "GIFs",
+        "message_type_voice": "Voice",
+        "message_type_video_note": "Video circles",
+        "message_type_file": "Files",
+        "message_type_sticker": "Stickers",
+        "message_type_poll": "Polls",
+        "message_type_other": "Other",
         "list_groups": "List groups",
         "select_chat": "Select chat",
         "search_chats": "Search chats",
+        "chat_selected_column": "Select",
         "chat_title_column": "Title",
         "chat_id_column": "Chat ID",
         "chat_username_column": "Username",
         "chat_type_column": "Type",
-        "use_selected_chat": "Use selected chat",
+        "use_selected_chat": "Use selected chat(s)",
         "refresh_chat_list": "Refresh chat list",
         "no_chat_selected": "Please select a chat from the list.",
         "chat_selected_message": "Selected chat {title} ({chat_id})",
+        "multi_chat_selected_message": "Selected {count} chats.",
+        "select_all_chats": "All",
+        "all_chats_warning_title": "Select all chats",
+        "all_chats_warning_first": (
+            "You are about to select all {count} loaded chats.\n\n"
+            "This can affect many chats if you start cleanup afterwards. Continue?"
+        ),
+        "all_chats_warning_second": (
+            "Final warning: selecting all chats is broad and risky.\n\n"
+            "The app will still wait for you to click a cleanup button, but any deletion action will run for every selected chat. Select all chats?"
+        ),
+        "all_chats_selected_message": "All loaded chats selected: {count}.",
+        "multi_chat_title": "{count} selected chats",
+        "confirm_multi_cleanup_message": (
+            "Selected chats: {count}\n\n"
+            "Date/time range: {date_range}\n\n"
+            "Message types: {message_types}\n\n"
+            "The app will process them one by one. Deletion is irreversible and Telegram may refuse or limit some deletions.\n\n"
+            "Continue?"
+        ),
         "index_only": "Index only",
         "start_cleanup": "Start cleanup",
         "delete_indexed_only": "Delete indexed only",
@@ -77,6 +114,8 @@ TRANSLATIONS = {
             "Chat: {title}\n"
             "Chat ID: {chat_id}\n"
             "Known messages: {indexed}\n\n"
+            "Date/time range: {date_range}\n\n"
+            "Message types: {message_types}\n\n"
             "Deletion is irreversible. Continue?"
         ),
         "confirm_delete_db_title": "Delete local database",
@@ -100,6 +139,22 @@ TRANSLATIONS = {
         "cancel_qr_login": "Cancel QR login",
         "qr_code_expired": "QR code expired. A new one will be generated automatically.",
         "qr_link_copied": "QR login link copied to clipboard.",
+        "resume_prompt_title": "Continue saved progress?",
+        "resume_prompt_heading": "Saved cleanup progress was found.",
+        "resume_prompt_message": (
+            "Chat: {title}\n"
+            "Chat ID: {chat_id}\n"
+            "Last phase: {phase}\n"
+            "Indexed: {indexed}\n"
+            "Deleted: {deleted}\n"
+            "Pending: {pending}\n"
+            "Failed: {failed}\n"
+            "Last update: {last_update}\n\n"
+            "Continue from the locally saved state?"
+        ),
+        "resume_continue": "Continue",
+        "resume_review": "Review progress",
+        "resume_dismiss": "Dismiss",
         "cleanup_finished": "Cleanup finished.",
         "retry_finished": "Retry failed finished.",
         "index_finished": "Indexing finished.",
@@ -127,7 +182,54 @@ TRANSLATIONS = {
         "chat_id": "Chat ID",
         "batch_size": "Размер батча",
         "pause_between_batches": "Пауза между батчами (сек)",
+        "date_from": "С даты/времени",
+        "date_to": "По дату/время",
+        "date_format_hint": "Формат YYYY-MM-DD HH:MM или first/last",
+        "message_types": "Типы сообщений",
+        "message_type_all": "Все типы сообщений",
+        "message_type_text": "Текст",
+        "message_type_links": "Ссылки",
+        "message_type_photo": "Фото",
+        "message_type_video": "Видео",
+        "message_type_gif": "GIF",
+        "message_type_voice": "Голосовые",
+        "message_type_video_note": "Кружки",
+        "message_type_file": "Файлы",
+        "message_type_sticker": "Стикеры",
+        "message_type_poll": "Опросы",
+        "message_type_other": "Прочее",
         "list_groups": "Список групп",
+        "select_chat": "Выбор чатов",
+        "search_chats": "Поиск чатов",
+        "chat_selected_column": "Выбор",
+        "chat_title_column": "Название",
+        "chat_id_column": "Chat ID",
+        "chat_username_column": "Username",
+        "chat_type_column": "Тип",
+        "use_selected_chat": "Использовать выбранные чаты",
+        "refresh_chat_list": "Обновить список",
+        "no_chat_selected": "Выберите хотя бы один чат из списка.",
+        "chat_selected_message": "Выбран чат {title} ({chat_id})",
+        "multi_chat_selected_message": "Выбрано чатов: {count}.",
+        "select_all_chats": "Все",
+        "all_chats_warning_title": "Выбор всех чатов",
+        "all_chats_warning_first": (
+            "Вы собираетесь выбрать все загруженные чаты: {count}.\n\n"
+            "Если потом запустить очистку, она затронет много чатов. Продолжить?"
+        ),
+        "all_chats_warning_second": (
+            "Финальное предупреждение: выбор всех чатов - широкое и рискованное действие.\n\n"
+            "Приложение все равно будет ждать нажатия кнопки очистки, но операция удаления пройдет по каждому выбранному чату. Выбрать все чаты?"
+        ),
+        "all_chats_selected_message": "Выбраны все загруженные чаты: {count}.",
+        "multi_chat_title": "Выбрано чатов: {count}",
+        "confirm_multi_cleanup_message": (
+            "Выбрано чатов: {count}\n\n"
+            "Диапазон дат/времени: {date_range}\n\n"
+            "Типы сообщений: {message_types}\n\n"
+            "Приложение обработает их по очереди. Удаление необратимо, а Telegram может отказать или ограничить часть удалений.\n\n"
+            "Продолжить?"
+        ),
         "index_only": "Только индексировать",
         "start_cleanup": "Начать очистку",
         "delete_indexed_only": "Удалить уже проиндексированное",
@@ -170,6 +272,8 @@ TRANSLATIONS = {
             "Чат: {title}\n"
             "Chat ID: {chat_id}\n"
             "Известно сообщений: {indexed}\n\n"
+            "Диапазон дат/времени: {date_range}\n\n"
+            "Типы сообщений: {message_types}\n\n"
             "Удаление необратимо. Продолжить?"
         ),
         "confirm_delete_db_title": "Удалить локальную базу",
@@ -193,6 +297,22 @@ TRANSLATIONS = {
         "cancel_qr_login": "Отменить QR-вход",
         "qr_code_expired": "Срок действия QR-кода истёк. Новый код будет создан автоматически.",
         "qr_link_copied": "QR-ссылка скопирована в буфер обмена.",
+        "resume_prompt_title": "Продолжить сохранённый прогресс?",
+        "resume_prompt_heading": "Найден незавершённый прогресс очистки.",
+        "resume_prompt_message": (
+            "Чат: {title}\n"
+            "Chat ID: {chat_id}\n"
+            "Последняя фаза: {phase}\n"
+            "Проиндексировано: {indexed}\n"
+            "Удалено: {deleted}\n"
+            "Осталось: {pending}\n"
+            "Failed: {failed}\n"
+            "Последнее обновление: {last_update}\n\n"
+            "Продолжить с локально сохранённого состояния?"
+        ),
+        "resume_continue": "Продолжить",
+        "resume_review": "Посмотреть прогресс",
+        "resume_dismiss": "Пропустить",
         "cleanup_finished": "Очистка завершена.",
         "retry_finished": "Повтор failed завершён.",
         "index_finished": "Индексирование завершено.",
