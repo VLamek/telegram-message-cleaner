@@ -203,6 +203,12 @@ Build macOS ARM on an Apple Silicon Mac:
 APP_VERSION=1.0.0 ./scripts/build_macos_arm.sh
 ```
 
+To build from an isolated virtual environment, pass its Python explicitly:
+
+```bash
+PYTHON=.venv/bin/python APP_VERSION=1.0.0 ./scripts/build_macos_arm.sh
+```
+
 ## 13. Available Interface Languages
 
 - English: `en`
@@ -227,7 +233,13 @@ Run it manually from GitHub Actions or push a `v*` tag. Tag builds publish artif
 
 When running from source, local data is stored outside the repository by default in the user's local app data directory.
 
-When running as a frozen build, local runtime files are stored next to the executable:
+When running as a frozen macOS build, local runtime files are stored in:
+
+- `~/Library/Application Support/TelegramMessageCleaner/`
+
+This lets the app start correctly from a read-only DMG before it is copied elsewhere.
+
+When running as a frozen Windows build, local runtime files are stored next to the executable:
 
 - `telegram_message_cleaner_config.json`
 - `telegram_message_cleaner.session`

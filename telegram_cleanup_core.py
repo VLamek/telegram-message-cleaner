@@ -77,6 +77,10 @@ def get_app_dir() -> Path:
 
 def get_runtime_data_dir() -> Path:
     if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            data_dir = Path.home() / "Library" / "Application Support" / DEV_DATA_DIR_NAME
+            data_dir.mkdir(parents=True, exist_ok=True)
+            return data_dir
         return get_app_dir()
 
     local_app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")

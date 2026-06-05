@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from telegram_cleanup_core import ConfigStore, SUPPORTED_LANGUAGES, parse_message_date_range
+from telegram_cleanup_core import ConfigStore, SUPPORTED_LANGUAGES, get_runtime_data_dir, parse_message_date_range
 from telegram_cleanup_i18n import TRANSLATIONS
 
 
@@ -53,6 +55,18 @@ class ReleaseReadinessTests(unittest.TestCase):
             gui_source.count("tk.Toplevel(self.root)"),
             gui_source.count("self._prepare_modal_window(window)"),
         )
+
+    def test_macos_frozen_runtime_files_use_application_support(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            home = Path(tmp_dir)
+            with (
+                patch.object(sys, "frozen", True, create=True),
+                patch.object(sys, "platform", "darwin"),
+                patch("telegram_cleanup_core.Path.home", return_value=home),
+            ):
+                data_dir = get_runtime_data_dir()
+                self.assertEqual(home / "Library" / "Application Support" / "TelegramMessageCleaner", data_dir)
+                self.assertTrue(data_dir.exists())
 
 
 if __name__ == "__main__":
