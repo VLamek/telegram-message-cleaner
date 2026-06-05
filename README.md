@@ -203,6 +203,8 @@ Build macOS ARM on an Apple Silicon Mac:
 APP_VERSION=1.0.0 ./scripts/build_macos_arm.sh
 ```
 
+The macOS DMG is laid out as a drag-and-drop installer with the app icon, an arrow background, and an `Applications` shortcut.
+
 To build from an isolated virtual environment, pass its Python explicitly:
 
 ```bash
