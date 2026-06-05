@@ -11,12 +11,29 @@ $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $releaseRoot = Join-Path $root "release"
 $distPath = Join-Path $releaseRoot "windows-$Arch"
 $workPath = Join-Path $root "build\windows-$Arch"
-$specPath = Join-Path $root "TelegramMessageCleaner.spec"
 
 Set-Location $root
-& $PythonExe -m PyInstaller --clean --noconfirm --distpath $distPath --workpath $workPath $specPath
+if (Test-Path -LiteralPath $distPath) {
+    Remove-Item -LiteralPath $distPath -Recurse -Force
+}
+if (Test-Path -LiteralPath $workPath) {
+    Remove-Item -LiteralPath $workPath -Recurse -Force
+}
+
+& $PythonExe -m PyInstaller --clean --noconfirm --windowed `
+    --name TelegramMessageCleaner `
+    --distpath $distPath `
+    --workpath $workPath `
+    (Join-Path $root "telegram_cleanup_gui.py")
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE."
+}
 
 $appDir = Join-Path $distPath "TelegramMessageCleaner"
+if (-not (Test-Path -LiteralPath $appDir -PathType Container)) {
+    throw "Expected PyInstaller output directory was not created: $appDir"
+}
+
 $zipPath = Join-Path $releaseRoot "TelegramMessageCleaner-windows-$Arch-portable.zip"
 if (Test-Path $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
