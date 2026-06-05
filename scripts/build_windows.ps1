@@ -50,8 +50,18 @@ for ($attempt = 1; $attempt -le 5; $attempt++) {
     }
 }
 
-$iscc = Get-Command iscc -ErrorAction SilentlyContinue
-if (-not $iscc) {
+$isccCommand = Get-Command iscc -ErrorAction SilentlyContinue
+$isccPath = $null
+if ($isccCommand) {
+    if ($isccCommand.Source) {
+        $isccPath = $isccCommand.Source
+    } elseif ($isccCommand.Path) {
+        $isccPath = $isccCommand.Path
+    } elseif ($isccCommand.Definition) {
+        $isccPath = $isccCommand.Definition
+    }
+}
+if (-not $isccPath) {
     $knownIsccPaths = @(
         (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
         (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
@@ -59,30 +69,35 @@ if (-not $iscc) {
     )
     foreach ($candidate in $knownIsccPaths) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-            $iscc = Get-Item -LiteralPath $candidate
+            $isccPath = $candidate
             break
         }
     }
 }
-if ($iscc) {
+if ($isccPath) {
     $installerOut = Join-Path $releaseRoot "windows-$Arch-installer"
     $cleanInstallerOut = Join-Path $releaseRoot "installers"
     New-Item -ItemType Directory -Force -Path $installerOut | Out-Null
     New-Item -ItemType Directory -Force -Path $cleanInstallerOut | Out-Null
-    & $iscc.FullName `
+    & $isccPath `
         "/DAppVersion=$AppVersion" `
         "/DAppArch=$Arch" `
         "/DSourceDir=$appDir" `
         "/DOutputDir=$installerOut" `
         (Join-Path $root "installer\windows\TelegramMessageCleaner.iss")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Inno Setup failed with exit code $LASTEXITCODE."
+    }
     $installerPath = Join-Path $installerOut "TelegramMessageCleaner-windows-$Arch-setup.exe"
     if (Test-Path -LiteralPath $installerPath) {
         Copy-Item -LiteralPath $installerPath -Destination (Join-Path $cleanInstallerOut (Split-Path -Leaf $installerPath)) -Force
+    } else {
+        throw "Expected installer was not created: $installerPath"
     }
 }
 
 Write-Host "Windows $Arch portable package: $zipPath"
-if ($iscc) {
+if ($isccPath) {
     Write-Host "Windows $Arch installer output: $installerOut"
     Write-Host "Windows $Arch ready-to-run installer: $(Join-Path $releaseRoot "installers\TelegramMessageCleaner-windows-$Arch-setup.exe")"
 } else {
