@@ -580,6 +580,7 @@ class TelegramCleanupGUI:
         )
         style.configure(
             "TSpinbox",
+            background=field_bg,
             fieldbackground=field_bg,
             foreground=fg,
             insertcolor=fg,
@@ -590,9 +591,34 @@ class TelegramCleanupGUI:
         )
         style.map(
             "TSpinbox",
-            fieldbackground=[("readonly", field_bg), ("disabled", field_bg)],
-            foreground=[("readonly", fg), ("disabled", fg)],
-            arrowcolor=[("readonly", fg), ("disabled", fg)],
+            background=[
+                ("active", field_bg),
+                ("focus", field_bg),
+                ("selected", field_bg),
+                ("readonly", field_bg),
+                ("disabled", field_bg),
+            ],
+            fieldbackground=[
+                ("active", field_bg),
+                ("focus", field_bg),
+                ("selected", field_bg),
+                ("readonly", field_bg),
+                ("disabled", field_bg),
+            ],
+            foreground=[
+                ("active", fg),
+                ("focus", fg),
+                ("selected", fg),
+                ("readonly", fg),
+                ("disabled", fg),
+            ],
+            arrowcolor=[
+                ("active", fg),
+                ("focus", fg),
+                ("selected", fg),
+                ("readonly", fg),
+                ("disabled", fg),
+            ],
         )
         style.configure("TCombobox", fieldbackground=field_bg, foreground=fg)
         style.map("TCombobox", fieldbackground=[("readonly", field_bg)])
@@ -1980,13 +2006,13 @@ class TelegramCleanupGUI:
         buttons.columnconfigure(0, weight=1)
 
         def confirm() -> None:
-            date_from = "first"
-            date_to = "last"
-            if start_enabled_var.get():
-                date_from = self._datetime_picker_to_text(start_picker, is_end=False)
-            if end_enabled_var.get():
-                date_to = self._datetime_picker_to_text(end_picker, is_end=True)
             try:
+                date_from = "first"
+                date_to = "last"
+                if start_enabled_var.get():
+                    date_from = self._datetime_picker_to_text(start_picker, is_end=False)
+                if end_enabled_var.get():
+                    date_to = self._datetime_picker_to_text(end_picker, is_end=True)
                 parse_message_date_range(date_from, date_to)
             except ValueError as exc:
                 messagebox.showwarning(
@@ -2086,7 +2112,7 @@ class TelegramCleanupGUI:
                 day_var.set(f"{last_day:02d}")
 
         def update_state(*_args: object) -> None:
-            state = "readonly" if enabled_var.get() else "disabled"
+            state = "normal" if enabled_var.get() else "disabled"
             for widget in widgets:
                 widget.configure(state=state)
 
@@ -2119,13 +2145,30 @@ class TelegramCleanupGUI:
 
     def _datetime_picker_to_text(self, picker: dict[str, Any], *, is_end: bool) -> str:
         fields: dict[str, tk.StringVar] = picker["fields"]
-        year = int(fields["year"].get())
-        month = int(fields["month"].get())
-        day = int(fields["day"].get())
-        hour = int(fields["hour"].get())
-        minute = int(fields["minute"].get())
+        current_year = datetime.now().year
+        year = self._read_datetime_picker_number(fields["year"], minimum=1970, maximum=current_year + 1)
+        month = self._read_datetime_picker_number(fields["month"], minimum=1, maximum=12)
+        last_day = calendar.monthrange(year, month)[1]
+        day = self._read_datetime_picker_number(fields["day"], minimum=1, maximum=last_day)
+        hour = self._read_datetime_picker_number(fields["hour"], minimum=0, maximum=23)
+        minute = self._read_datetime_picker_number(fields["minute"], minimum=0, maximum=59)
+        fields["year"].set(str(year))
+        fields["month"].set(f"{month:02d}")
+        fields["day"].set(f"{day:02d}")
+        fields["hour"].set(f"{hour:02d}")
+        fields["minute"].set(f"{minute:02d}")
         second = 59 if is_end else 0
         return datetime(year, month, day, hour, minute, second).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _read_datetime_picker_number(self, variable: tk.StringVar, *, minimum: int, maximum: int) -> int:
+        text = variable.get().strip()
+        if not text:
+            raise ValueError(self.translator.gettext("date_range_invalid_value"))
+        try:
+            value = int(text)
+        except ValueError as exc:
+            raise ValueError(self.translator.gettext("date_range_invalid_value")) from exc
+        return max(minimum, min(maximum, value))
 
     def _render_multi_chat_selection_state(self, chat_ids: list[str]) -> None:
         self._render_progress(
