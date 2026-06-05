@@ -4,6 +4,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+import calendar
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
@@ -222,36 +223,39 @@ class TelegramCleanupGUI:
         self.pause_label = ttk.Label(self.cleanup_frame)
         self.date_from_label = ttk.Label(self.cleanup_frame)
         self.date_to_label = ttk.Label(self.cleanup_frame)
-        self.date_format_hint_label = ttk.Label(self.cleanup_frame)
 
         self.chat_id_label.grid(row=0, column=0, sticky="w", padx=6, pady=4)
         self.batch_size_label.grid(row=0, column=2, sticky="w", padx=6, pady=4)
         self.pause_label.grid(row=0, column=4, sticky="w", padx=6, pady=4)
         self.date_from_label.grid(row=1, column=0, sticky="w", padx=6, pady=4)
         self.date_to_label.grid(row=1, column=2, sticky="w", padx=6, pady=4)
-        self.date_format_hint_label.grid(row=1, column=4, columnspan=2, sticky="w", padx=6, pady=4)
 
         self._register_widget_text(self.chat_id_label, "chat_id")
         self._register_widget_text(self.batch_size_label, "batch_size")
         self._register_widget_text(self.pause_label, "pause_between_batches")
         self._register_widget_text(self.date_from_label, "date_from")
         self._register_widget_text(self.date_to_label, "date_to")
-        self._register_widget_text(self.date_format_hint_label, "date_format_hint")
 
         self.chat_id_entry = ttk.Entry(self.cleanup_frame, textvariable=self.chat_id_var)
         self.batch_size_entry = ttk.Entry(self.cleanup_frame, textvariable=self.batch_size_var, width=10)
         self.pause_entry = ttk.Entry(self.cleanup_frame, textvariable=self.pause_seconds_var, width=10)
-        self.date_from_entry = ttk.Entry(self.cleanup_frame, textvariable=self.date_from_var)
-        self.date_to_entry = ttk.Entry(self.cleanup_frame, textvariable=self.date_to_var)
+        self.date_from_entry = ttk.Entry(self.cleanup_frame, textvariable=self.date_from_var, state="readonly")
+        self.date_to_entry = ttk.Entry(self.cleanup_frame, textvariable=self.date_to_var, state="readonly")
+        self.date_range_button = ttk.Button(self.cleanup_frame, command=self._select_date_range)
 
         self.chat_id_entry.grid(row=0, column=1, sticky="ew", padx=6, pady=4)
         self.batch_size_entry.grid(row=0, column=3, sticky="ew", padx=6, pady=4)
         self.pause_entry.grid(row=0, column=5, sticky="ew", padx=6, pady=4)
         self.date_from_entry.grid(row=1, column=1, sticky="ew", padx=6, pady=4)
         self.date_to_entry.grid(row=1, column=3, sticky="ew", padx=6, pady=4)
+        self.date_range_button.grid(row=1, column=4, columnspan=2, sticky="ew", padx=6, pady=4)
 
         self.chat_id_entry.bind("<FocusOut>", lambda _event: self._load_local_chat_state())
         self.chat_id_entry.bind("<Return>", lambda _event: self._load_local_chat_state())
+        self.date_from_entry.bind("<Button-1>", lambda _event: self._select_date_range())
+        self.date_to_entry.bind("<Button-1>", lambda _event: self._select_date_range())
+        self.date_from_entry.bind("<Return>", lambda _event: self._select_date_range())
+        self.date_to_entry.bind("<Return>", lambda _event: self._select_date_range())
 
         self.list_groups_button = ttk.Button(self.cleanup_frame, command=self._list_groups)
         self.index_only_button = ttk.Button(self.cleanup_frame, command=self._index_only)
@@ -279,6 +283,7 @@ class TelegramCleanupGUI:
         self._register_widget_text(self.stop_after_batch_button, "stop_after_batch")
         self._register_widget_text(self.retry_failed_button, "retry_failed")
         self._register_widget_text(self.delete_local_db_button, "delete_local_db")
+        self._register_widget_text(self.date_range_button, "select_date_range")
 
     def _build_progress_section(self) -> None:
         for column in range(4):
@@ -472,7 +477,7 @@ class TelegramCleanupGUI:
         if widget.winfo_class() not in {"Entry", "TEntry"}:
             return None
         try:
-            if str(widget.cget("state")) == "disabled":
+            if str(widget.cget("state")) in {"disabled", "readonly"}:
                 return None
         except tk.TclError:
             return None
@@ -1965,6 +1970,217 @@ class TelegramCleanupGUI:
     def _format_date_range_for_display(self, date_from: str | None, date_to: str | None) -> str:
         return f"{date_from or 'first'} -> {date_to or 'last'}"
 
+    def _select_date_range(self) -> None:
+        selected = self._open_date_range_selection_modal()
+        if selected is None:
+            return
+        date_from, date_to = selected
+        self.date_from_var.set(date_from)
+        self.date_to_var.set(date_to)
+        self.core.save_config({"date_from": date_from, "date_to": date_to})
+
+    def _open_date_range_selection_modal(self) -> tuple[str, str] | None:
+        window = tk.Toplevel(self.root)
+        window.title(self.translator.gettext("date_range_modal_title"))
+        window.geometry("660x420")
+        window.minsize(620, 380)
+        window.transient(self.root)
+        window.grab_set()
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(2, weight=1)
+
+        result: dict[str, tuple[str, str] | None] = {"date_range": None}
+        now = datetime.now().replace(second=0, microsecond=0)
+
+        start_enabled_var = tk.BooleanVar(value=self.date_from_var.get().strip().lower() not in {"", "first"})
+        end_enabled_var = tk.BooleanVar(value=self.date_to_var.get().strip().lower() not in {"", "last"})
+
+        header = ttk.Label(
+            window,
+            text=self.translator.gettext("date_range_modal_message"),
+            wraplength=610,
+            justify="left",
+        )
+        header.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+
+        content = ttk.Frame(window)
+        content.grid(row=1, column=0, sticky="nsew", padx=14, pady=8)
+        content.columnconfigure(0, weight=1)
+        content.columnconfigure(1, weight=1)
+
+        start_picker = self._build_datetime_picker(
+            content,
+            title_key="date_range_start_enabled",
+            enabled_var=start_enabled_var,
+            initial_value=self._parse_datetime_picker_value(
+                self.date_from_var.get(),
+                default=now.replace(hour=0, minute=0),
+            ),
+        )
+        end_picker = self._build_datetime_picker(
+            content,
+            title_key="date_range_end_enabled",
+            enabled_var=end_enabled_var,
+            initial_value=self._parse_datetime_picker_value(
+                self.date_to_var.get(),
+                default=now.replace(hour=23, minute=59),
+            ),
+        )
+        start_picker["frame"].grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        end_picker["frame"].grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+
+        buttons = ttk.Frame(window)
+        buttons.grid(row=2, column=0, sticky="ew", padx=14, pady=(8, 14))
+        buttons.columnconfigure(0, weight=1)
+
+        def confirm() -> None:
+            date_from = "first"
+            date_to = "last"
+            if start_enabled_var.get():
+                date_from = self._datetime_picker_to_text(start_picker, is_end=False)
+            if end_enabled_var.get():
+                date_to = self._datetime_picker_to_text(end_picker, is_end=True)
+            try:
+                parse_message_date_range(date_from, date_to)
+            except ValueError as exc:
+                messagebox.showwarning(
+                    self.translator.gettext("warning_title"),
+                    str(exc),
+                    parent=window,
+                )
+                return
+            result["date_range"] = (date_from, date_to)
+            window.destroy()
+
+        def reset_to_full_history() -> None:
+            result["date_range"] = ("first", "last")
+            window.destroy()
+
+        def cancel() -> None:
+            result["date_range"] = None
+            window.destroy()
+
+        reset_button = ttk.Button(
+            buttons,
+            text=self.translator.gettext("date_range_reset"),
+            command=reset_to_full_history,
+        )
+        continue_button = ttk.Button(buttons, text=self.translator.gettext("continue"), command=confirm)
+        cancel_button = ttk.Button(buttons, text=self.translator.gettext("cancel"), command=cancel)
+        reset_button.grid(row=0, column=1, sticky="e", padx=(0, 8))
+        continue_button.grid(row=0, column=2, sticky="e", padx=(0, 8))
+        cancel_button.grid(row=0, column=3, sticky="e")
+
+        window.protocol("WM_DELETE_WINDOW", cancel)
+        self._apply_theme()
+        window.focus_force()
+        self.root.wait_window(window)
+        return result["date_range"]
+
+    def _build_datetime_picker(
+        self,
+        parent: ttk.Frame,
+        *,
+        title_key: str,
+        enabled_var: tk.BooleanVar,
+        initial_value: datetime,
+    ) -> dict[str, Any]:
+        frame = ttk.LabelFrame(parent)
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(2, weight=1)
+
+        enabled_checkbox = ttk.Checkbutton(
+            frame,
+            text=self.translator.gettext(title_key),
+            variable=enabled_var,
+        )
+        enabled_checkbox.grid(row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(10, 8))
+
+        year_var = tk.StringVar(value=str(initial_value.year))
+        month_var = tk.StringVar(value=f"{initial_value.month:02d}")
+        day_var = tk.StringVar(value=f"{initial_value.day:02d}")
+        hour_var = tk.StringVar(value=f"{initial_value.hour:02d}")
+        minute_var = tk.StringVar(value=f"{initial_value.minute:02d}")
+
+        fields: dict[str, tk.StringVar] = {
+            "year": year_var,
+            "month": month_var,
+            "day": day_var,
+            "hour": hour_var,
+            "minute": minute_var,
+        }
+        widgets: list[ttk.Spinbox] = []
+
+        def add_spinbox(row: int, column: int, label_key: str, variable: tk.StringVar, **kwargs: Any) -> ttk.Spinbox:
+            label = ttk.Label(frame, text=self.translator.gettext(label_key))
+            label.grid(row=row, column=column, sticky="w", padx=10, pady=(0, 3))
+            spinbox = ttk.Spinbox(frame, textvariable=variable, width=8, wrap=True, justify="center", **kwargs)
+            spinbox.grid(row=row + 1, column=column, sticky="ew", padx=10, pady=(0, 10))
+            widgets.append(spinbox)
+            return spinbox
+
+        current_year = datetime.now().year
+        add_spinbox(1, 0, "date_range_year", year_var, from_=1970, to=current_year + 1)
+        add_spinbox(1, 1, "date_range_month", month_var, values=[f"{value:02d}" for value in range(1, 13)])
+        day_spinbox = add_spinbox(1, 2, "date_range_day", day_var, values=[f"{value:02d}" for value in range(1, 32)])
+        add_spinbox(3, 0, "date_range_hour", hour_var, values=[f"{value:02d}" for value in range(0, 24)])
+        add_spinbox(3, 1, "date_range_minute", minute_var, values=[f"{value:02d}" for value in range(0, 60)])
+
+        def update_day_values(*_args: object) -> None:
+            try:
+                year = int(year_var.get())
+                month = int(month_var.get())
+                current_day = int(day_var.get())
+            except ValueError:
+                return
+            last_day = calendar.monthrange(year, month)[1]
+            day_spinbox.configure(values=[f"{value:02d}" for value in range(1, last_day + 1)])
+            if current_day > last_day:
+                day_var.set(f"{last_day:02d}")
+
+        def update_state(*_args: object) -> None:
+            state = "readonly" if enabled_var.get() else "disabled"
+            for widget in widgets:
+                widget.configure(state=state)
+
+        for variable in (year_var, month_var):
+            variable.trace_add("write", update_day_values)
+        enabled_var.trace_add("write", update_state)
+        update_day_values()
+        update_state()
+
+        return {
+            "frame": frame,
+            "enabled_var": enabled_var,
+            "fields": fields,
+        }
+
+    def _parse_datetime_picker_value(self, value: str, *, default: datetime) -> datetime:
+        text = (value or "").strip()
+        if not text or text.lower() in {"first", "last"}:
+            return default
+        normalized = text.replace("T", " ")
+        if len(normalized) == 10 and normalized[4] == "-" and normalized[7] == "-":
+            normalized = f"{normalized} {default.hour:02d}:{default.minute:02d}"
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return default
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed.replace(second=0, microsecond=0)
+
+    def _datetime_picker_to_text(self, picker: dict[str, Any], *, is_end: bool) -> str:
+        fields: dict[str, tk.StringVar] = picker["fields"]
+        year = int(fields["year"].get())
+        month = int(fields["month"].get())
+        day = int(fields["day"].get())
+        hour = int(fields["hour"].get())
+        minute = int(fields["minute"].get())
+        second = 59 if is_end else 0
+        return datetime(year, month, day, hour, minute, second).strftime("%Y-%m-%d %H:%M:%S")
+
     def _render_multi_chat_selection_state(self, chat_ids: list[str]) -> None:
         self._render_progress(
             {
@@ -2180,6 +2396,7 @@ class TelegramCleanupGUI:
             self.retry_failed_button,
             self.delete_local_db_button,
             self.browse_db_button,
+            self.date_range_button,
         ]
         for button in normal_buttons:
             button.configure(state="disabled" if is_busy else "normal")
