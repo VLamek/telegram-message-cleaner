@@ -539,6 +539,27 @@ class TelegramCleanupGUI:
         style.map("TButton", background=[("active", button_bg), ("disabled", border)])
         style.configure("TCheckbutton", background=bg, foreground=fg)
         style.configure("TEntry", fieldbackground=field_bg, foreground=fg, insertcolor=fg)
+        style.map(
+            "TEntry",
+            fieldbackground=[("readonly", field_bg), ("disabled", field_bg)],
+            foreground=[("readonly", fg), ("disabled", fg)],
+        )
+        style.configure(
+            "TSpinbox",
+            fieldbackground=field_bg,
+            foreground=fg,
+            insertcolor=fg,
+            arrowcolor=fg,
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+        )
+        style.map(
+            "TSpinbox",
+            fieldbackground=[("readonly", field_bg), ("disabled", field_bg)],
+            foreground=[("readonly", fg), ("disabled", fg)],
+            arrowcolor=[("readonly", fg), ("disabled", fg)],
+        )
         style.configure("TCombobox", fieldbackground=field_bg, foreground=fg)
         style.map("TCombobox", fieldbackground=[("readonly", field_bg)])
         style.configure("ChatSelector.Treeview", background=field_bg, fieldbackground=field_bg, foreground=fg)
@@ -563,8 +584,16 @@ class TelegramCleanupGUI:
             selectbackground="#4e8dd6",
             selectforeground="#ffffff",
         )
-        if self.chat_selector_window and self.chat_selector_window.winfo_exists():
-            self.chat_selector_window.configure(bg=bg)
+        self._apply_window_backgrounds(self.root, bg)
+
+    def _apply_window_backgrounds(self, widget: tk.Widget, background: str) -> None:
+        if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
+            try:
+                widget.configure(bg=background)
+            except tk.TclError:
+                pass
+        for child in widget.winfo_children():
+            self._apply_window_backgrounds(child, background)
 
     def _save_credentials(self) -> None:
         api_id = self.api_id_var.get().strip()

@@ -49,18 +49,25 @@ if (-not $iscc) {
 }
 if ($iscc) {
     $installerOut = Join-Path $releaseRoot "windows-$Arch-installer"
+    $cleanInstallerOut = Join-Path $releaseRoot "installers"
     New-Item -ItemType Directory -Force -Path $installerOut | Out-Null
+    New-Item -ItemType Directory -Force -Path $cleanInstallerOut | Out-Null
     & $iscc.FullName `
         "/DAppVersion=$AppVersion" `
         "/DAppArch=$Arch" `
         "/DSourceDir=$appDir" `
         "/DOutputDir=$installerOut" `
         (Join-Path $root "installer\windows\TelegramMessageCleaner.iss")
+    $installerPath = Join-Path $installerOut "TelegramMessageCleaner-windows-$Arch-setup.exe"
+    if (Test-Path -LiteralPath $installerPath) {
+        Copy-Item -LiteralPath $installerPath -Destination (Join-Path $cleanInstallerOut (Split-Path -Leaf $installerPath)) -Force
+    }
 }
 
 Write-Host "Windows $Arch portable package: $zipPath"
 if ($iscc) {
     Write-Host "Windows $Arch installer output: $installerOut"
+    Write-Host "Windows $Arch ready-to-run installer: $(Join-Path $releaseRoot "installers\TelegramMessageCleaner-windows-$Arch-setup.exe")"
 } else {
     Write-Host "Inno Setup is not installed; skipped installer .exe generation."
 }
