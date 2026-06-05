@@ -1,7 +1,8 @@
 param(
     [ValidateSet("x64", "x86")]
     [string]$Arch = "x64",
-    [string]$AppVersion = "1.0.0"
+    [string]$AppVersion = "1.0.0",
+    [string]$PythonExe = "python"
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,7 +14,7 @@ $workPath = Join-Path $root "build\windows-$Arch"
 $specPath = Join-Path $root "TelegramMessageCleaner.spec"
 
 Set-Location $root
-python -m PyInstaller --clean --noconfirm --distpath $distPath --workpath $workPath $specPath
+& $PythonExe -m PyInstaller --clean --noconfirm --distpath $distPath --workpath $workPath $specPath
 
 $appDir = Join-Path $distPath "TelegramMessageCleaner"
 $zipPath = Join-Path $releaseRoot "TelegramMessageCleaner-windows-$Arch-portable.zip"
@@ -33,10 +34,23 @@ for ($attempt = 1; $attempt -le 5; $attempt++) {
 }
 
 $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+if (-not $iscc) {
+    $knownIsccPaths = @(
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+        (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+    )
+    foreach ($candidate in $knownIsccPaths) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            $iscc = Get-Item -LiteralPath $candidate
+            break
+        }
+    }
+}
 if ($iscc) {
     $installerOut = Join-Path $releaseRoot "windows-$Arch-installer"
     New-Item -ItemType Directory -Force -Path $installerOut | Out-Null
-    & $iscc.Source `
+    & $iscc.FullName `
         "/DAppVersion=$AppVersion" `
         "/DAppArch=$Arch" `
         "/DSourceDir=$appDir" `

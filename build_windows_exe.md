@@ -31,6 +31,12 @@ Use 32-bit Python, then run:
 .\scripts\build_windows.ps1 -Arch x86 -AppVersion 1.0.0
 ```
 
+If 32-bit Python is installed side-by-side, pass it explicitly:
+
+```powershell
+.\scripts\build_windows.ps1 -Arch x86 -AppVersion 1.0.0 -PythonExe "$env:LOCALAPPDATA\Programs\Python\Python312-32\python.exe"
+```
+
 ## Outputs
 
 Local output goes to `release/`:
