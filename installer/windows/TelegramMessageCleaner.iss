@@ -17,6 +17,7 @@
 AppId={{F0835F0C-5408-49E5-97DA-8C3C72D958A8}
 AppName={#AppName}
 AppVersion={#AppVersion}
+AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
 DefaultDirName={localappdata}\Programs\Telegram Message Cleaner
 DefaultGroupName=Telegram Message Cleaner
