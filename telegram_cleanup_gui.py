@@ -529,6 +529,7 @@ class TelegramCleanupGUI:
             text_bg = "#ffffff"
             button_bg = "#e8edf2"
 
+        self._theme_background = bg
         self.root.configure(bg=bg)
         style.configure(".", background=bg, foreground=fg)
         style.configure("TFrame", background=bg)
@@ -654,6 +655,15 @@ class TelegramCleanupGUI:
                 pass
         for child in widget.winfo_children():
             self._apply_window_backgrounds(child, background)
+
+    def _prepare_modal_window(self, window: tk.Toplevel) -> None:
+        self._apply_theme()
+        self._apply_window_backgrounds(window, getattr(self, "_theme_background", self.root.cget("bg")))
+        try:
+            window.update_idletasks()
+        except tk.TclError:
+            pass
+        window.focus_force()
 
     def _save_credentials(self) -> None:
         api_id = self.api_id_var.get().strip()
@@ -1434,8 +1444,7 @@ class TelegramCleanupGUI:
         review_button.grid(row=0, column=1, sticky="ew", padx=6)
         dismiss_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
-        self._apply_theme()
-        window.focus_force()
+        self._prepare_modal_window(window)
 
     def _review_resume_candidate(self) -> None:
         candidate = self.resume_candidate or {}
@@ -1590,7 +1599,7 @@ class TelegramCleanupGUI:
         self.chat_selector_use_button.grid(row=0, column=1, sticky="e")
         self._register_widget_text(self.chat_selector_use_button, "use_selected_chat")
 
-        self._apply_theme()
+        self._prepare_modal_window(window)
         self._refresh_translations()
         self._populate_chat_selector_tree()
         self.chat_selector_search_entry.focus_set()
@@ -2044,8 +2053,7 @@ class TelegramCleanupGUI:
         cancel_button.grid(row=0, column=3, sticky="e")
 
         window.protocol("WM_DELETE_WINDOW", cancel)
-        self._apply_theme()
-        window.focus_force()
+        self._prepare_modal_window(window)
         self.root.wait_window(window)
         return result["date_range"]
 
@@ -2349,7 +2357,7 @@ class TelegramCleanupGUI:
         cancel_button.grid(row=0, column=2, sticky="e")
 
         window.protocol("WM_DELETE_WINDOW", cancel)
-        window.focus_force()
+        self._prepare_modal_window(window)
         self.root.wait_window(window)
         return result["message_types"]
 

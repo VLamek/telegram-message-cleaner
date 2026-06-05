@@ -47,6 +47,13 @@ class ReleaseReadinessTests(unittest.TestCase):
         self.assertIsNotNone(bounded.start)
         self.assertIsNotNone(bounded.end)
 
+    def test_all_gui_toplevel_modals_apply_shared_theme(self) -> None:
+        gui_source = (ROOT / "telegram_cleanup_gui.py").read_text(encoding="utf-8")
+        self.assertEqual(
+            gui_source.count("tk.Toplevel(self.root)"),
+            gui_source.count("self._prepare_modal_window(window)"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
