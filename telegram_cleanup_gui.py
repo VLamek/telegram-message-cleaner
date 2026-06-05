@@ -537,7 +537,41 @@ class TelegramCleanupGUI:
         style.configure("TLabelframe.Label", background=bg, foreground=fg)
         style.configure("TButton", background=button_bg, foreground=fg, borderwidth=1)
         style.map("TButton", background=[("active", button_bg), ("disabled", border)])
-        style.configure("TCheckbutton", background=bg, foreground=fg)
+        style.configure(
+            "TCheckbutton",
+            background=bg,
+            foreground=fg,
+            focuscolor=bg,
+            indicatorbackground=field_bg,
+            indicatorforeground=fg,
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+        )
+        style.map(
+            "TCheckbutton",
+            background=[
+                ("active", bg),
+                ("pressed", bg),
+                ("focus", bg),
+                ("selected", bg),
+                ("disabled", bg),
+            ],
+            foreground=[
+                ("active", fg),
+                ("pressed", fg),
+                ("focus", fg),
+                ("selected", fg),
+                ("disabled", fg),
+            ],
+            indicatorbackground=[
+                ("selected", "#4e8dd6"),
+                ("active", field_bg),
+                ("pressed", field_bg),
+                ("disabled", field_bg),
+            ],
+            indicatorforeground=[("selected", "#ffffff"), ("disabled", fg)],
+        )
         style.configure("TEntry", fieldbackground=field_bg, foreground=fg, insertcolor=fg)
         style.map(
             "TEntry",
