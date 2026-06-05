@@ -1,127 +1,89 @@
 # Telegram Message Cleaner
 
-`Telegram Message Cleaner` is a local Windows-first desktop utility for deleting your own Telegram messages from selected Telegram chats.
+Telegram Message Cleaner is a local desktop app for deleting your own Telegram messages from selected chats and groups.
 
-It authenticates through Telegram MTProto as a user account with `Telethon`, indexes message IDs for explicit `chat_id` values, stores only local progress metadata in SQLite, and then deletes pending message IDs in batches while showing progress, ETA, logs, pause/stop state, and retry information for failed deletions.
+It uses the normal Telegram MTProto user flow through Telethon: API ID, API Hash, phone number, login code, and a 2FA password when Telegram requires one. The app runs locally, stores only local progress metadata, and does not include analytics, telemetry, a backend, or bundled Telegram credentials.
 
-## What the app does
+## 1. What The App Does
 
-- Runs locally on your machine. It is not a SaaS product.
-- Authenticates your own Telegram account through GUI fields for API ID, API Hash, phone number, login code, and 2FA password when needed.
-- Supports QR login from the GUI as an alternative to manual code entry when Telegram prefers in-app authorization.
-- Lets you enter one `chat_id`, or select multiple chats in the GUI picker for sequential processing.
-- Lets you limit the current indexing/deletion run to a custom date/time range.
-- Lets you choose which message types to delete in the current run.
-- Indexes your own messages before deletion so the app can resume later and show progress more accurately.
-- Deletes your own messages by message ID with `revoke=True` where Telegram allows it.
-- Uses the main SQLite database as a local work queue. Confirmed deleted messages are removed from that queue after verification.
-- Moves failed deletion metadata into a separate failed SQLite database so retry can work without leaving completed work in the main database.
-- Stores local progress metadata only:
-  - `chat_id`
-  - `message_id`
-  - `message_date`
-  - `status`
-  - `last_error`
-  - timestamps and run metadata
-- Shows logs in the GUI and in local rotating log files.
-- Supports `Pause after current batch`, `Stop after current batch`, resume on the next run, and `Retry failed`.
-- On startup, offers to continue locally saved unfinished progress in a visible dialog.
+- Lists Telegram dialogs available to your authorized account.
+- Lets you choose one or many chats or groups.
+- Lets you choose a date/time range through a modal picker.
+- Lets you choose message types such as text, links, photos, videos, files, stickers, polls, and other records.
+- Indexes your own messages before deletion so deletion can resume after interruption.
+- Deletes your own messages in batches with Telegram `revoke=True` where Telegram allows it.
+- Shows progress, ETA, logs, pause/stop state, failed deletions, and retry information.
+- Keeps local progress metadata in SQLite so unfinished runs can continue later.
 
-## What the app does not do
+The app does not store message text, captions, media bytes, file names, or raw message payloads.
 
-- It does not delete across all groups automatically without explicit selection and warnings.
-- It does not scan all dialogs and clean everything in the background.
-- It does not clean multiple groups in parallel.
-- It does not use the Telegram Bot API.
-- It does not send your data anywhere except normal Telegram API calls needed for your own account operations.
-- It does not store message text, captions, media content, file names, or raw message payloads.
-- It does not restore deleted messages.
+## 2. Who It Is For
 
-## Important warnings
+Use this app if you need a local utility to clean up messages sent by your own Telegram account in specific chats or groups.
+
+It is not for automated account farming, hidden background deletion, deleting other people's messages, or bypassing Telegram restrictions.
+
+## 3. What It Deletes And Telegram Limits
+
+Telegram Message Cleaner attempts to delete messages sent by the authorized user account in the selected chats.
+
+Important limits:
 
 - Deletion is irreversible.
-- Telegram may refuse or limit some deletion operations depending on chat type, permissions, historical limits, service-message behavior, or API restrictions.
-- Some message IDs may remain failed even after retries.
-- The app now verifies after each delete request whether the target `message_id` actually disappeared. If Telegram leaves some items behind, they are moved to the separate failed database instead of being reported as deleted.
-- Poll messages sent by the user can be deleted when Telegram allows it, but resetting poll votes themselves is not guaranteed by Telegram.
-- Session files must never be shared with another person.
+- Telegram can refuse or limit deletion depending on chat type, permissions, message age, service-message behavior, FloodWait limits, or API rules.
+- Some message IDs can remain failed even after retries.
+- The app processes multiple chats sequentially, not in parallel.
+- The app does not restore deleted messages.
+- The app does not use the Telegram Bot API.
 
-## Requirements
+## 4. Download A Ready Release
 
-- Python 3.11+ recommended
-- Windows 10/11 first
-- Telegram API ID and API Hash from Telegram
+Open the repository's GitHub Releases page and download the artifact for your platform.
 
-Install dependencies:
+Release artifacts are built by GitHub Actions from this repository:
 
-```bash
-pip install -r requirements.txt
-```
+- Windows 64-bit installer: `TelegramMessageCleaner-windows-x64-setup.exe`
+- Windows 32-bit installer: `TelegramMessageCleaner-windows-x86-setup.exe`
+- macOS Apple Silicon installer image: `TelegramMessageCleaner-macos-arm64.dmg`
 
-## How to get Telegram API ID and API Hash
+Portable ZIP packages may also be attached for Windows and macOS for users who prefer not to run an installer.
 
-1. Open `https://my.telegram.org`.
+## 5. Which Installer To Choose
+
+- Windows 64-bit: choose `TelegramMessageCleaner-windows-x64-setup.exe` for most Windows 10/11 computers.
+- Windows 32-bit: choose `TelegramMessageCleaner-windows-x86-setup.exe` only for a 32-bit Windows installation.
+- macOS ARM: choose `TelegramMessageCleaner-macos-arm64.dmg` for Apple Silicon Macs such as M1, M2, M3, or newer.
+
+No Telegram session file, API ID, API Hash, token, or secret is included in release artifacts.
+
+## 6. Get API ID And API Hash
+
+Telegram requires an API ID and API Hash for user-account MTProto applications.
+
+1. Open the official Telegram developer site: `https://my.telegram.org`.
 2. Sign in with your Telegram account.
 3. Open `API development tools`.
-4. Create an application if needed.
-5. Copy your `api_id` and `api_hash`.
+4. Create an application if you do not already have one.
+5. Copy the generated `API ID` and `API Hash`.
+6. Paste them into Telegram Message Cleaner.
 
-Do not share your API Hash or your session file.
+Do not share your API Hash. Do not use someone else's public API ID or API Hash.
 
-## Local safety against git commits
+VPN, proxy, WARP, datacenter networks, or suspicious IP addresses can prevent Telegram from creating an app or showing API credentials. If Telegram refuses to create an application or behaves strangely, first try again without VPN/proxy, from normal home internet or mobile internet.
 
-When you run the app from source inside a git repository, the app now keeps its persistent local data outside the repository by default, in the current user's local application data directory.
+## 7. Authorize In The App
 
-This is done so values entered into the GUI, such as API credentials, phone number, local session state, database progress, and logs, do not end up as normal files inside the repo and do not get committed accidentally.
+The only supported authorization flow is the regular Telegram API login flow.
 
-If you explicitly choose a custom database path inside the repository, the app also adds that runtime path to the local git exclude file when possible.
+1. Start the app.
+2. Enter `API ID`, `API Hash`, and `Phone number`.
+3. Click `Save API credentials`.
+4. Click `Send code`.
+5. Enter the login code received from Telegram.
+6. Click `Sign in`.
+7. If Telegram asks for 2FA, enter your 2FA password and click `Submit 2FA password`.
 
-## How to run from Python
-
-GUI:
-
-```bash
-python telegram_cleanup_gui.py
-```
-
-CLI fallback:
-
-```bash
-python telegram_cleanup_cli.py list
-python telegram_cleanup_cli.py index --chat-id CHAT_ID
-python telegram_cleanup_cli.py delete --chat-id CHAT_ID
-python telegram_cleanup_cli.py delete-indexed --chat-id CHAT_ID
-python telegram_cleanup_cli.py retry-failed --chat-id CHAT_ID
-```
-
-CLI options:
-
-- `--chat-id`
-- `--batch-size` default `100`
-- `--pause` default `2`
-- `--from-date` default `first`
-- `--to-date` default `last`
-- `--message-types` default `all`
-- `--db-file` default `telegram_message_cleaner.sqlite3`
-
-## GUI flow
-
-### 1. Authorize through the GUI
-
-Open the GUI and fill:
-
-- `API ID`
-- `API Hash`
-- `Phone number`
-
-Then:
-
-1. Click `Save API credentials`.
-2. Either click `Send code` and enter the login code from Telegram, or click `QR login` and scan the QR code with Telegram on a device where the account is already logged in.
-3. If you used the code flow, click `Sign in`.
-4. If Telegram asks for 2FA, enter the password and click `Submit 2FA password`.
-
-The app shows auth status values:
+Auth statuses include:
 
 - `not configured`
 - `unauthorized`
@@ -130,130 +92,142 @@ The app shows auth status values:
 - `authorized`
 - `auth error`
 
-After successful authorization, the app shows available account information such as username, phone number, and first/last name when Telegram provides them.
+No alternate authorization method is exposed in the app.
 
-### QR login notes
+## 8. Choose Groups
 
-- `QR login` opens a separate QR window inside the app.
-- The QR code is generated locally; the app does not send it to any external QR service.
-- While the QR is shown, the app keeps the Telethon `qr_login().wait()` flow active in the background.
-- If the QR token expires before you scan it, the app automatically generates a fresh QR token.
-- If the QR scan is accepted but Telegram requires 2FA, enter the password in the main window and click `Submit 2FA password`.
+Click `List groups` to open the chat selection window.
 
-### 2. List groups
+The selector includes:
 
-Click `List groups`.
+- a search field;
+- a scrollable table of dialogs;
+- checkbox-style row selection;
+- normal multi-row selection;
+- an `All` checkbox with two warning confirmations;
+- a confirmation button in the lower-right corner.
 
-The app opens a separate chat selection window with:
+Double-clicking a row does not confirm selection. Select the rows you need, then click the lower-right confirmation button. If nothing is selected, the app shows a warning and does not continue.
 
-- a search field
-- a scrollable table of dialogs
-- checkbox-style row selection
-- an `All` checkbox that requires two separate warning confirmations before it selects every loaded chat
-- automatic filling of the chosen `chat_id` values back into the main window
+For many selected chats, the progress panel shows a compact summary instead of a long ID list.
 
-The GUI log will also print dialog metadata such as:
+## 9. Start Deletion
 
-- title
-- id
-- username when available
-- type such as `user`, `chat`, `megagroup`, or `channel`
+Choose:
 
-This action does not delete anything.
+- `Batch size`;
+- `Pause between batches`;
+- date/time range through `Select range`;
+- message types when the modal opens.
 
-### 3. Enter Chat IDs
+Then click one of:
 
-Paste one explicit Telegram `chat_id` into the `Chat ID` field, paste multiple IDs separated by commas, or select chats from the graphical chat picker opened by `List groups`.
+- `Index only` to collect local message metadata without deleting;
+- `Start cleanup` to index and then delete;
+- `Delete indexed only` to delete already indexed messages;
+- `Retry failed` to retry records from the failed database.
 
-When multiple chats are selected, the app processes them sequentially, one chat at a time. It does not run parallel cleanup across chats.
+If confirmation is enabled, the app shows the selected chat, known indexed count, date range, message types, and an irreversible deletion warning before deleting.
 
-### 4. Start cleanup
+## 10. If Deletion Was Interrupted
 
-Set:
+The app stores local progress metadata in SQLite.
 
-- `Batch size`
-- `Pause between batches`
+- `Pause after current batch` finishes the active batch and pauses safely.
+- `Stop after current batch` finishes the active batch and stops safely.
+- On the next startup, the app can offer to continue saved progress.
+- You can also enter the same chat and run `Start cleanup`, `Delete indexed only`, or `Retry failed` again.
 
-Then click:
+The app does not duplicate already known local records when resuming.
 
-- `Index only` if you want only the metadata pass
-- `Start cleanup` if you want indexing followed by deletion
-- `Delete indexed only` if you want to delete the already indexed subset immediately without waiting for a full indexing pass
+## 11. Common Problems
 
-By default, the date/time range fields are:
+`API ID` or `API Hash` cannot be created:
 
-- `From date/time`: `first`
-- `To date/time`: `last`
+- Try without VPN, proxy, WARP, or datacenter IPs.
+- Use normal home internet or mobile internet.
+- Do not use public API credentials from other people.
 
-That means the app covers the full available chat history, like before. To limit the current run, replace those values with a local date/time such as `2026-01-01 00:00` and `2026-01-31 23:59`. A date without time, such as `2026-01-01`, means start of that day in `From` and end of that day in `To`.
+Telegram asks for 2FA:
 
-When you start a deletion action, the app opens a modal message type selector. By default, all message types are enabled. You can limit the current run to types such as text, links, photos, videos, GIFs, voice messages, video circles, files, stickers, polls, or other message records.
+- Enter your Telegram 2FA password in the app and submit it.
 
-If `Require confirmation before deletion` is enabled for one selected chat, the app resolves the chat first and then shows a confirmation dialog with:
+FloodWait or rate limits:
 
-- chat title
-- chat ID
-- currently known indexed count
-- selected date/time range
-- selected message types
-- an irreversible deletion warning
+- Increase pause between batches.
+- Stop and resume later.
 
-If multiple chats are selected, the app shows a multi-chat confirmation warning before deletion starts. Chats are still processed one by one.
+Messages remain failed:
 
-### 5. How indexing works
+- Telegram may refuse those deletions.
+- Use `Retry failed` later.
+- Check local logs for the exact failure reason.
 
-Indexing scans the selected chat and records only minimal metadata for messages sent by the authorized user inside the selected date/time range and selected message types.
+The app window looks too wide after selecting many groups:
 
-It does not store:
+- Current releases use compact multi-chat progress. Details stay in logs instead of the progress ID field.
 
-- message text
-- captions
-- media bytes
-- file names
-- forwarded payload content
+## 12. Build From Source
 
-It stores only local progress metadata in SQLite so the app can resume later and avoid duplicating already known records.
+Install dependencies:
 
-If indexing is interrupted, the app now saves its local resume cursor and the next indexing run continues from the saved point in the older history direction while also checking for newer messages that appeared later.
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
 
-### 6. Why indexing is needed
+Run the GUI:
 
-Indexing is required because the app needs a known local list of message IDs before deletion can show meaningful:
+```bash
+python telegram_cleanup_gui.py
+```
 
-- total known messages
-- remaining pending messages
-- deleted count
-- failed count
-- percentage
-- approximate ETA
+Run basic tests:
 
-During indexing, progress is count-based rather than true percentage-based because the total may still be unknown.
+```bash
+python -m unittest discover -s tests
+python -m compileall telegram_cleanup_gui.py telegram_cleanup_core.py telegram_cleanup_i18n.py telegram_cleanup_storage.py telegram_cleanup_cli.py
+```
 
-### 7. Pause, stop, and resume
+Build a local Windows package:
 
-- `Pause after current batch` finishes the active batch, saves SQLite state, and pauses safely.
-- `Stop after current batch` finishes the active batch, saves SQLite state, and stops safely.
-- To resume later, run the app again, enter the same `chat_id`, and click `Start cleanup`.
-- If the app finds unfinished local progress on startup, it shows a dialog over the main window so you can continue, review the saved progress, or dismiss it.
-- If you only want to delete the already discovered subset first, use `Delete indexed only` in the GUI or `delete-indexed` in the CLI.
+```powershell
+.\scripts\build_windows.ps1 -Arch x64 -AppVersion 1.0.0
+```
 
-If new messages appeared in the same chat after a previous run, a new indexing pass adds only new message IDs without duplicating older records.
+This creates local artifacts under `release/`. If Inno Setup is installed and available as `iscc`, it also creates a Windows setup executable.
 
-### 8. Retry failed
+Build macOS ARM on an Apple Silicon Mac:
 
-`Retry failed` attempts deletion again for message IDs stored in the separate failed database.
+```bash
+APP_VERSION=1.0.0 ./scripts/build_macos_arm.sh
+```
 
-The app still does not store message content during this process.
+## 13. Available Interface Languages
 
-After a deletion run finishes from start to end, the main progress database is cleared for that chat. Failed message metadata, if any, remains in the failed database for retry.
+- English: `en`
+- Russian: `ru`
+- Spanish: `es`
+- Simplified Chinese: `zh-CN`
+- French: `fr`
 
-## Local database and logs
+The selected language is saved in the local config. Missing translation keys fall back safely to English.
 
-When running from source during development, local runtime files are stored in the current user's local app data folder, typically under:
+## Release Artifact Automation
 
-- `%LOCALAPPDATA%\\TelegramMessageCleaner\\`
+The workflow `.github/workflows/release-artifacts.yml` builds:
 
-When running as a frozen Windows build, local runtime files are kept next to the `.exe`:
+- Windows x64 installer and portable ZIP;
+- Windows x86 installer and portable ZIP;
+- macOS ARM DMG and app ZIP.
+
+Run it manually from GitHub Actions or push a `v*` tag. Tag builds publish artifacts to GitHub Releases.
+
+## Local Data And Privacy
+
+When running from source, local data is stored outside the repository by default in the user's local app data directory.
+
+When running as a frozen build, local runtime files are stored next to the executable:
 
 - `telegram_message_cleaner_config.json`
 - `telegram_message_cleaner.session`
@@ -262,53 +236,4 @@ When running as a frozen Windows build, local runtime files are kept next to the
 - `TelegramMessageCleaner_Logs/latest.log`
 - `TelegramMessageCleaner_Logs/history.log`
 
-You can delete the local progress database with `Delete local progress database`.
-
-That action:
-
-- deletes only local progress metadata
-- deletes both the main progress database and the failed retry database
-- does not restore already deleted Telegram messages
-
-## Simple light/dark theme
-
-The GUI supports `Light` and `Dark`.
-
-The dark theme is intentionally simple and utilitarian. The goal is readability and comfort, not a polished design system.
-
-## Windows packaging
-
-See [build_windows_exe.md](build_windows_exe.md) for packaging instructions.
-
-Recommended stable build:
-
-```bash
-pyinstaller --onedir --windowed --name TelegramMessageCleaner telegram_cleanup_gui.py
-```
-
-Optional single-file build:
-
-```bash
-pyinstaller --onefile --windowed --name TelegramMessageCleaner telegram_cleanup_gui.py
-```
-
-## Security and privacy notes
-
-- The app runs locally.
-- It does not have analytics, telemetry, or a backend.
-- It does not upload stored metadata anywhere.
-- It does not store message content.
-- It should never ship with someone else's Telegram session file.
-
-## Sharing the app with another person
-
-Another trusted person can use the app locally, but they must use:
-
-- their own Telegram account
-- their own API ID
-- their own API Hash
-- their own phone number
-- their own login code
-- their own 2FA password if enabled
-
-Do not give them your own `telegram_message_cleaner.session` file.
+Do not distribute your session file. Another person must use their own Telegram account, API ID, API Hash, phone number, login code, and 2FA password.

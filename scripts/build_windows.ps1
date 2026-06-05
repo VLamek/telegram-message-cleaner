@@ -1,0 +1,52 @@
+param(
+    [ValidateSet("x64", "x86")]
+    [string]$Arch = "x64",
+    [string]$AppVersion = "1.0.0"
+)
+
+$ErrorActionPreference = "Stop"
+
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$releaseRoot = Join-Path $root "release"
+$distPath = Join-Path $releaseRoot "windows-$Arch"
+$workPath = Join-Path $root "build\windows-$Arch"
+$specPath = Join-Path $root "TelegramMessageCleaner.spec"
+
+Set-Location $root
+python -m PyInstaller --clean --noconfirm --distpath $distPath --workpath $workPath $specPath
+
+$appDir = Join-Path $distPath "TelegramMessageCleaner"
+$zipPath = Join-Path $releaseRoot "TelegramMessageCleaner-windows-$Arch-portable.zip"
+if (Test-Path $zipPath) {
+    Remove-Item -LiteralPath $zipPath -Force
+}
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+        Compress-Archive -Path (Join-Path $appDir "*") -DestinationPath $zipPath -Force
+        break
+    } catch {
+        if ($attempt -eq 5) {
+            throw
+        }
+        Start-Sleep -Seconds 2
+    }
+}
+
+$iscc = Get-Command iscc -ErrorAction SilentlyContinue
+if ($iscc) {
+    $installerOut = Join-Path $releaseRoot "windows-$Arch-installer"
+    New-Item -ItemType Directory -Force -Path $installerOut | Out-Null
+    & $iscc.Source `
+        "/DAppVersion=$AppVersion" `
+        "/DAppArch=$Arch" `
+        "/DSourceDir=$appDir" `
+        "/DOutputDir=$installerOut" `
+        (Join-Path $root "installer\windows\TelegramMessageCleaner.iss")
+}
+
+Write-Host "Windows $Arch portable package: $zipPath"
+if ($iscc) {
+    Write-Host "Windows $Arch installer output: $installerOut"
+} else {
+    Write-Host "Inno Setup is not installed; skipped installer .exe generation."
+}

@@ -50,7 +50,7 @@ SESSION_FILE_STEM = "telegram_message_cleaner"
 DB_FILE_NAME = "telegram_message_cleaner.sqlite3"
 FAILED_DB_FILE_NAME = "telegram_message_cleaner_failed.sqlite3"
 DEV_DATA_DIR_NAME = "TelegramMessageCleaner"
-SUPPORTED_LANGUAGES = ("en", "ru")
+SUPPORTED_LANGUAGES = ("en", "ru", "es", "zh-CN", "fr")
 SUPPORTED_THEMES = ("Light", "Dark")
 MESSAGE_TYPE_OPTIONS = (
     "text",
@@ -283,7 +283,7 @@ class ConfigStore:
             "api_hash": "",
             "phone_number": "",
             "language": "en",
-            "theme": "Light",
+            "theme": "Dark",
             "require_confirmation_before_deletion": True,
             "db_file": DB_FILE_NAME,
         }
@@ -308,7 +308,7 @@ class ConfigStore:
         if data.get("language") not in SUPPORTED_LANGUAGES:
             data["language"] = "en"
         if data.get("theme") not in SUPPORTED_THEMES:
-            data["theme"] = "Light"
+            data["theme"] = "Dark"
         if "require_confirmation_before_deletion" not in data:
             data["require_confirmation_before_deletion"] = True
         if not data.get("db_file"):
@@ -430,9 +430,6 @@ class TelegramCleanupCore:
 
     def send_code(self, phone_number: str | None = None) -> dict[str, Any]:
         return asyncio.run(self._send_code_async(phone_number))
-
-    def start_qr_login(self, control: RunControl | None = None) -> dict[str, Any]:
-        return asyncio.run(self._start_qr_login_async(control or RunControl()))
 
     def sign_in(self, login_code: str, phone_number: str | None = None) -> dict[str, Any]:
         return asyncio.run(self._sign_in_async(login_code, phone_number))
@@ -802,55 +799,6 @@ class TelegramCleanupCore:
         info_message = self._build_code_delivery_hint(result)
         self._log("info", "Telegram login code requested.", delivery=info_message)
         return {"status": "code sent", "info_message": info_message}
-
-    async def _start_qr_login_async(self, control: RunControl) -> dict[str, Any]:
-        control.reset()
-        async with self._connected_client() as client:
-            if await client.is_user_authorized():
-                me = await client.get_me()
-                return {
-                    "status": "authorized",
-                    "account": self._serialize_account(me),
-                    "info_message": "This app session is already authorized. You do not need QR login.",
-                }
-
-            self._log("info", "QR login started.")
-            while not control.stop_requested():
-                qr_login = await client.qr_login()
-                expires_at = qr_login.expires
-                self._emit(
-                    "qr_login_ready",
-                    url=qr_login.url,
-                    expires_at=expires_at.isoformat(),
-                )
-                self._log("info", "QR login token created.", expires_at=expires_at.isoformat())
-
-                while not control.stop_requested():
-                    remaining = (expires_at - self._utc_now()).total_seconds()
-                    if remaining <= 0:
-                        self._emit("qr_login_expired")
-                        self._log("info", "QR login token expired. Recreating.")
-                        break
-
-                    try:
-                        user = await qr_login.wait(timeout=min(5.0, max(0.5, remaining)))
-                        self._log("info", "QR login completed.")
-                        return {
-                            "status": "authorized",
-                            "account": self._serialize_account(user),
-                            "info_message": "QR login completed successfully.",
-                        }
-                    except asyncio.TimeoutError:
-                        continue
-                    except errors.SessionPasswordNeededError:
-                        self._log("info", "QR login accepted, but Telegram requires 2FA password.")
-                        return {
-                            "status": "2FA required",
-                            "info_message": "QR scan accepted. Enter your 2FA password to finish sign in.",
-                        }
-
-            self._log("info", "QR login cancelled by user.")
-            return {"status": "unauthorized", "account": None, "info_message": "QR login cancelled."}
 
     async def _sign_in_async(self, login_code: str, phone_number: str | None) -> dict[str, Any]:
         phone = (phone_number or self._pending_phone_number or self.config.get("phone_number") or "").strip()

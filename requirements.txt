@@ -1,4 +1,3 @@
 telethon
 python-dotenv
 pyinstaller
-qrcode

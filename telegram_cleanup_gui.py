@@ -14,12 +14,12 @@ from telegram_cleanup_core import (
     DB_FILE_NAME,
     MESSAGE_TYPE_OPTIONS,
     RunControl,
+    SUPPORTED_LANGUAGES,
     TelegramCleanupCore,
     parse_message_date_range,
     parse_message_type_filter,
 )
 from telegram_cleanup_i18n import Translator
-from telegram_cleanup_qr import create_qr_photoimage
 
 
 class TelegramCleanupGUI:
@@ -47,13 +47,6 @@ class TelegramCleanupGUI:
         self.chat_selector_selected_ids: set[str] = set()
         self.selected_chat_ids: list[str] = []
         self.selected_chat_titles: dict[str, str] = {}
-        self.qr_login_window: tk.Toplevel | None = None
-        self.qr_photoimage: tk.PhotoImage | None = None
-        self.qr_url_var = tk.StringVar()
-        self.qr_status_var = tk.StringVar()
-        self.qr_expires_var = tk.StringVar()
-        self.qr_expires_at: datetime | None = None
-        self.qr_countdown_job: str | None = None
         self.resume_prompt_window: tk.Toplevel | None = None
         self.resume_candidate: dict[str, Any] | None = None
 
@@ -103,7 +96,7 @@ class TelegramCleanupGUI:
             value=bool(config.get("require_confirmation_before_deletion", True))
         )
         self.language_var = tk.StringVar(value=config.get("language", "en"))
-        self.theme_var = tk.StringVar(value=config.get("theme", "Light"))
+        self.theme_var = tk.StringVar(value=config.get("theme", "Dark"))
 
         self.auth_status_var = tk.StringVar(value=self.translator.gettext("status_not_configured"))
         self.authorized_as_var = tk.StringVar(value=self.translator.gettext("none"))
@@ -182,21 +175,18 @@ class TelegramCleanupGUI:
 
         self.save_credentials_button = ttk.Button(self.auth_frame, command=self._save_credentials)
         self.send_code_button = ttk.Button(self.auth_frame, command=self._send_code)
-        self.qr_login_button = ttk.Button(self.auth_frame, command=self._start_qr_login)
         self.sign_in_button = ttk.Button(self.auth_frame, command=self._sign_in)
         self.submit_password_button = ttk.Button(self.auth_frame, command=self._submit_password)
         self.logout_button = ttk.Button(self.auth_frame, command=self._logout)
 
         self.save_credentials_button.grid(row=2, column=0, sticky="ew", padx=6, pady=8)
         self.send_code_button.grid(row=2, column=1, sticky="ew", padx=6, pady=8)
-        self.qr_login_button.grid(row=2, column=2, sticky="ew", padx=6, pady=8)
-        self.sign_in_button.grid(row=2, column=3, sticky="ew", padx=6, pady=8)
-        self.submit_password_button.grid(row=2, column=4, sticky="ew", padx=6, pady=8)
-        self.logout_button.grid(row=2, column=5, sticky="ew", padx=6, pady=8)
+        self.sign_in_button.grid(row=2, column=2, sticky="ew", padx=6, pady=8)
+        self.submit_password_button.grid(row=2, column=3, sticky="ew", padx=6, pady=8)
+        self.logout_button.grid(row=2, column=4, columnspan=2, sticky="ew", padx=6, pady=8)
 
         self._register_widget_text(self.save_credentials_button, "save_api_credentials")
         self._register_widget_text(self.send_code_button, "send_code")
-        self._register_widget_text(self.qr_login_button, "qr_login")
         self._register_widget_text(self.sign_in_button, "sign_in")
         self._register_widget_text(self.submit_password_button, "submit_2fa_password")
         self._register_widget_text(self.logout_button, "logout")
@@ -310,7 +300,7 @@ class TelegramCleanupGUI:
         self.progress_value_labels: list[ttk.Label] = []
         for key, var, row, column in rows:
             label = ttk.Label(self.progress_frame)
-            value_label = ttk.Label(self.progress_frame, textvariable=var)
+            value_label = ttk.Label(self.progress_frame, textvariable=var, wraplength=360)
             label.grid(row=row, column=column, sticky="w", padx=8, pady=3)
             value_label.grid(row=row, column=column + 1, sticky="w", padx=8, pady=3)
             self._register_widget_text(label, key)
@@ -351,7 +341,7 @@ class TelegramCleanupGUI:
         self.language_combo = ttk.Combobox(
             self.settings_frame,
             state="readonly",
-            values=["en", "ru"],
+            values=list(SUPPORTED_LANGUAGES),
             textvariable=self.language_var,
         )
         self.theme_combo = ttk.Combobox(
@@ -485,7 +475,7 @@ class TelegramCleanupGUI:
 
     def _apply_saved_config(self) -> None:
         self.language_var.set(self.core.get_config().get("language", "en"))
-        self.theme_var.set(self.core.get_config().get("theme", "Light"))
+        self.theme_var.set(self.core.get_config().get("theme", "Dark"))
         self.db_path_var.set(str(self.core.get_database_path()))
         self.require_confirmation_var.set(
             bool(self.core.get_config().get("require_confirmation_before_deletion", True))
@@ -514,9 +504,6 @@ class TelegramCleanupGUI:
             self.chat_selector_tree.heading("id", text=self.translator.gettext("chat_id_column"))
             self.chat_selector_tree.heading("username", text=self.translator.gettext("chat_username_column"))
             self.chat_selector_tree.heading("type", text=self.translator.gettext("chat_type_column"))
-        if self.qr_login_window and self.qr_login_window.winfo_exists():
-            self.qr_login_window.title(self.translator.gettext("qr_login"))
-
         self._set_auth_status_text(self.current_auth_status)
 
     def _apply_theme(self) -> None:
@@ -597,11 +584,6 @@ class TelegramCleanupGUI:
 
     def _send_code(self) -> None:
         self._launch_worker("send_code", self.core.send_code, self.phone_number_var.get().strip())
-
-    def _start_qr_login(self) -> None:
-        control = RunControl()
-        self._open_qr_login_window()
-        self._launch_worker("qr_login", self.core.start_qr_login, control=control)
 
     def _sign_in(self) -> None:
         self._launch_worker(
@@ -814,12 +796,23 @@ class TelegramCleanupGUI:
                         "snapshot": {
                             "phase": f"{mode} {index}/{total}",
                             "title": title or self.translator.gettext("none"),
-                            "chat_id": chat_id,
+                            "chat_id": self._format_multi_progress_text(
+                                total=total,
+                                processed=index - 1,
+                                remaining=total - index,
+                                errors=len(errors),
+                                current_chat_id=chat_id,
+                            ),
                             "indexed": 0,
                             "deleted": 0,
                             "pending": 0,
                             "failed": 0,
                             "percentage": round(((index - 1) / max(total, 1)) * 100, 2),
+                            "multi_total": total,
+                            "multi_processed": index - 1,
+                            "multi_remaining": total - index,
+                            "multi_errors": len(errors),
+                            "current_chat_id": chat_id,
                             "speed_text": self.translator.gettext("calculating"),
                             "eta_text": self.translator.gettext("calculating"),
                             "batch_number": 0,
@@ -890,11 +883,22 @@ class TelegramCleanupGUI:
 
             counts = self._summarize_multi_results(results)
             counts["percentage"] = 100 if status == "completed" else counts.get("percentage", 0)
+            attempted = len(results) + len(errors)
+            counts["multi_total"] = total
+            counts["multi_processed"] = len(results)
+            counts["multi_remaining"] = max(total - attempted, 0)
+            counts["multi_errors"] = len(errors)
             return {
                 "status": status,
                 "mode": mode,
-                "chat_id": ", ".join(chat_ids),
+                "chat_id": self._format_multi_progress_text(
+                    total=total,
+                    processed=len(results),
+                    remaining=max(total - attempted, 0),
+                    errors=len(errors),
+                ),
                 "title": self.translator.gettext("multi_chat_title", count=len(chat_ids)),
+                "total_chats": total,
                 "counts": counts,
                 "results": results,
                 "errors": errors,
@@ -1089,21 +1093,13 @@ class TelegramCleanupGUI:
         if event_type == "progress":
             self._render_progress(event.get("snapshot", {}))
             return
-        if event_type == "qr_login_ready":
-            self._render_qr_login(event)
-            return
-        if event_type == "qr_login_expired":
-            self.qr_status_var.set(self.translator.gettext("qr_code_expired"))
-            return
         if event_type == "worker_result":
             self._handle_worker_result(event.get("action"), event.get("result"))
             return
         if event_type == "worker_error":
             self._append_log(f"{event.get('action')}: {event.get('error')}")
-            if event.get("action") in {"send_code", "sign_in", "submit_password", "refresh_auth_status", "qr_login"}:
+            if event.get("action") in {"send_code", "sign_in", "submit_password", "refresh_auth_status"}:
                 self._set_auth_status_text("auth error")
-            if event.get("action") == "qr_login":
-                self._close_qr_login_window()
             self._show_error(str(event.get("error")))
             return
         if event_type == "worker_done":
@@ -1142,7 +1138,7 @@ class TelegramCleanupGUI:
         self._append_log(f"{message}{suffix}")
 
     def _handle_worker_result(self, action: str | None, result: Any) -> None:
-        if action in {"refresh_auth_status", "send_code", "sign_in", "submit_password", "logout", "qr_login"}:
+        if action in {"refresh_auth_status", "send_code", "sign_in", "submit_password", "logout"}:
             status = result.get("status", "auth error")
             self._set_auth_status_text(status)
             account = result.get("account")
@@ -1153,9 +1149,6 @@ class TelegramCleanupGUI:
             if action == "logout":
                 self.login_code_var.set("")
                 self.password_var.set("")
-                self._close_qr_login_window()
-            if action == "qr_login":
-                self._close_qr_login_window()
             return
 
         if action == "prepare_cleanup":
@@ -1186,9 +1179,18 @@ class TelegramCleanupGUI:
             if action and action.startswith("multi_"):
                 error_count = len(result.get("errors", []))
                 done_count = len(result.get("results", []))
+                total_count = int(result.get("total_chats") or done_count + error_count)
+                remaining_count = max(total_count - done_count - error_count, 0)
                 self._append_log(
                     f"Multi-chat {result.get('mode')} finished with status={status}; "
                     f"processed={done_count}; errors={error_count}."
+                )
+                title = self.translator.gettext("multi_chat_title", count=total_count)
+                chat_id = self._format_multi_progress_text(
+                    total=total_count,
+                    processed=done_count,
+                    remaining=remaining_count,
+                    errors=error_count,
                 )
             self._render_progress(
                 {
@@ -1462,6 +1464,7 @@ class TelegramCleanupGUI:
             columns=("selected", "title", "id", "username", "type"),
             show="headings",
             style="ChatSelector.Treeview",
+            selectmode="extended",
         )
         self.chat_selector_tree.heading("selected", text=self.translator.gettext("chat_selected_column"))
         self.chat_selector_tree.heading("title", text=self.translator.gettext("chat_title_column"))
@@ -1544,10 +1547,6 @@ class TelegramCleanupGUI:
                 ),
             )
 
-        children = self.chat_selector_tree.get_children()
-        if children:
-            self.chat_selector_tree.selection_set(children[0])
-            self.chat_selector_tree.focus(children[0])
         self._sync_all_chats_checkbox()
 
     def _use_selected_chat(self) -> None:
@@ -1556,12 +1555,7 @@ class TelegramCleanupGUI:
 
         selected_ids = self._get_checked_chat_ids()
         if not selected_ids:
-            selection = self.chat_selector_tree.selection()
-            if selection:
-                values = self.chat_selector_tree.item(selection[0], "values")
-                selected_ids = [str(values[2])]
-                self.chat_selector_selected_ids.add(str(values[2]))
-                self._capture_selected_chat_title(str(values[2]), str(values[1]))
+            selected_ids = self._get_highlighted_chat_ids()
 
         if not selected_ids:
             messagebox.showwarning(
@@ -1593,8 +1587,8 @@ class TelegramCleanupGUI:
     def _on_chat_selector_double_click(self, event: tk.Event) -> None:
         row_id = self.chat_selector_tree.identify_row(event.y)
         if row_id:
-            self._use_selected_chat()
             return "break"
+        return "break"
 
     def _toggle_focused_chat_selector_row(self, _event: tk.Event) -> str:
         row_id = self.chat_selector_tree.focus()
@@ -1668,135 +1662,24 @@ class TelegramCleanupGUI:
                 selected.append(chat_id)
         return selected
 
+    def _get_highlighted_chat_ids(self) -> list[str]:
+        selected: list[str] = []
+        seen: set[str] = set()
+        for row_id in self.chat_selector_tree.selection():
+            values = self.chat_selector_tree.item(row_id, "values")
+            if len(values) < 3:
+                continue
+            chat_id = str(values[2])
+            if not chat_id or chat_id in seen:
+                continue
+            selected.append(chat_id)
+            seen.add(chat_id)
+            self._capture_selected_chat_title(chat_id, str(values[1]))
+        return selected
+
     def _capture_selected_chat_title(self, chat_id: str, title: str) -> None:
         if chat_id:
             self.selected_chat_titles[chat_id] = title
-
-    def _open_qr_login_window(self) -> None:
-        if self.qr_login_window and self.qr_login_window.winfo_exists():
-            self.qr_login_window.deiconify()
-            self.qr_login_window.lift()
-            return
-
-        window = tk.Toplevel(self.root)
-        self.qr_login_window = window
-        window.title(self.translator.gettext("qr_login"))
-        window.geometry("470x650")
-        window.minsize(420, 560)
-        window.transient(self.root)
-        window.columnconfigure(0, weight=1)
-        window.protocol("WM_DELETE_WINDOW", self._cancel_qr_login)
-
-        top_frame = ttk.Frame(window)
-        top_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
-        top_frame.columnconfigure(0, weight=1)
-
-        self.qr_help_label = ttk.Label(top_frame, wraplength=420, justify="left")
-        self.qr_help_label.grid(row=0, column=0, sticky="w")
-        self._register_widget_text(self.qr_help_label, "qr_login_help")
-
-        self.qr_status_label = ttk.Label(top_frame, textvariable=self.qr_status_var, wraplength=420, justify="left")
-        self.qr_status_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
-
-        self.qr_image_label = ttk.Label(window)
-        self.qr_image_label.grid(row=1, column=0, padx=12, pady=8)
-
-        details_frame = ttk.Frame(window)
-        details_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=8)
-        details_frame.columnconfigure(1, weight=1)
-
-        self.qr_expires_label = ttk.Label(details_frame)
-        self.qr_expires_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self._register_widget_text(self.qr_expires_label, "qr_expires_in")
-        self.qr_expires_value_label = ttk.Label(details_frame, textvariable=self.qr_expires_var)
-        self.qr_expires_value_label.grid(row=0, column=1, sticky="w")
-
-        self.qr_url_label = ttk.Label(details_frame)
-        self.qr_url_label.grid(row=1, column=0, sticky="nw", padx=(0, 8), pady=(8, 0))
-        self._register_widget_text(self.qr_url_label, "qr_login_link")
-        self.qr_url_entry = ttk.Entry(details_frame, textvariable=self.qr_url_var)
-        self.qr_url_entry.grid(row=1, column=1, sticky="ew", pady=(8, 0))
-
-        button_frame = ttk.Frame(window)
-        button_frame.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 12))
-        button_frame.columnconfigure(0, weight=1)
-        button_frame.columnconfigure(1, weight=1)
-
-        self.qr_copy_link_button = ttk.Button(button_frame, command=self._copy_qr_login_link)
-        self.qr_copy_link_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self._register_widget_text(self.qr_copy_link_button, "copy_qr_link")
-
-        self.qr_cancel_button = ttk.Button(button_frame, command=self._cancel_qr_login)
-        self.qr_cancel_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
-        self._register_widget_text(self.qr_cancel_button, "cancel_qr_login")
-
-        self.qr_status_var.set(self.translator.gettext("qr_waiting"))
-        self.qr_expires_var.set(self.translator.gettext("calculating"))
-        self._apply_theme()
-        self._refresh_translations()
-
-    def _render_qr_login(self, event: dict[str, Any]) -> None:
-        self._open_qr_login_window()
-        url = str(event.get("url") or "")
-        expires_at_raw = str(event.get("expires_at") or "")
-        self.qr_url_var.set(url)
-        self.qr_status_var.set(self.translator.gettext("qr_waiting"))
-        self.qr_photoimage = create_qr_photoimage(url, scale=6)
-        self.qr_image_label.configure(image=self.qr_photoimage)
-        self.qr_image_label.image = self.qr_photoimage
-
-        self.qr_expires_at = None
-        if expires_at_raw:
-            try:
-                self.qr_expires_at = datetime.fromisoformat(expires_at_raw)
-            except ValueError:
-                self.qr_expires_at = None
-        self._schedule_qr_countdown()
-
-    def _schedule_qr_countdown(self) -> None:
-        if self.qr_countdown_job:
-            self.root.after_cancel(self.qr_countdown_job)
-            self.qr_countdown_job = None
-        self._update_qr_countdown()
-
-    def _update_qr_countdown(self) -> None:
-        if not self.qr_login_window or not self.qr_login_window.winfo_exists():
-            self.qr_countdown_job = None
-            return
-        if not self.qr_expires_at:
-            self.qr_expires_var.set(self.translator.gettext("calculating"))
-            self.qr_countdown_job = self.root.after(1000, self._update_qr_countdown)
-            return
-
-        remaining = int((self.qr_expires_at - datetime.now(self.qr_expires_at.tzinfo)).total_seconds())
-        if remaining <= 0:
-            self.qr_expires_var.set(self.translator.gettext("qr_code_expired"))
-        else:
-            self.qr_expires_var.set(f"{remaining} sec")
-        self.qr_countdown_job = self.root.after(1000, self._update_qr_countdown)
-
-    def _copy_qr_login_link(self) -> None:
-        url = self.qr_url_var.get().strip()
-        if not url:
-            return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(url)
-        self._append_log(self.translator.gettext("qr_link_copied"))
-
-    def _cancel_qr_login(self) -> None:
-        if self.active_action == "qr_login" and self.current_control:
-            self.core.request_stop(self.current_control)
-        self._close_qr_login_window()
-
-    def _close_qr_login_window(self) -> None:
-        if self.qr_countdown_job:
-            self.root.after_cancel(self.qr_countdown_job)
-            self.qr_countdown_job = None
-        if self.qr_login_window and self.qr_login_window.winfo_exists():
-            self.qr_login_window.destroy()
-        self.qr_login_window = None
-        self.qr_photoimage = None
-        self.qr_expires_at = None
 
     def _render_progress(self, snapshot: dict[str, Any]) -> None:
         phase = snapshot.get("phase") or self.translator.gettext("progress_idle")
@@ -2186,18 +2069,47 @@ class TelegramCleanupGUI:
             {
                 "phase": "multi-selection",
                 "title": self.translator.gettext("multi_chat_title", count=len(chat_ids)),
-                "chat_id": self._format_chat_ids_for_entry(chat_ids),
+                "chat_id": self._format_multi_progress_text(
+                    total=len(chat_ids),
+                    processed=0,
+                    remaining=len(chat_ids),
+                    errors=0,
+                ),
                 "indexed": 0,
                 "deleted": 0,
                 "pending": 0,
                 "failed": 0,
                 "percentage": 0,
+                "multi_total": len(chat_ids),
+                "multi_processed": 0,
+                "multi_remaining": len(chat_ids),
+                "multi_errors": 0,
                 "speed_text": self.translator.gettext("calculating"),
                 "eta_text": self.translator.gettext("calculating"),
                 "batch_number": 0,
                 "flood_wait_seconds": None,
             }
         )
+
+    def _format_multi_progress_text(
+        self,
+        *,
+        total: int,
+        processed: int,
+        remaining: int,
+        errors: int,
+        current_chat_id: str | None = None,
+    ) -> str:
+        summary = self.translator.gettext(
+            "multi_progress_summary",
+            total=total,
+            processed=processed,
+            remaining=remaining,
+            errors=errors,
+        )
+        if current_chat_id:
+            return f"{summary} | {self.translator.gettext('multi_progress_current', chat_id=current_chat_id)}"
+        return summary
 
     def _get_date_range_settings(self) -> tuple[str | None, str | None] | None:
         date_from = self.date_from_var.get().strip() or "first"
@@ -2385,7 +2297,6 @@ class TelegramCleanupGUI:
         normal_buttons = [
             self.save_credentials_button,
             self.send_code_button,
-            self.qr_login_button,
             self.sign_in_button,
             self.submit_password_button,
             self.logout_button,

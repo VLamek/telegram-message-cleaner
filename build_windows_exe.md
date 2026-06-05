@@ -1,44 +1,54 @@
-# Build Windows EXE
+# Build Windows Release Artifacts
 
-## Goal
+Windows builds use PyInstaller for the application bundle and Inno Setup for installer `.exe` files.
 
-The first stable packaging target is a Windows `--onedir` PyInstaller build for `Telegram Message Cleaner`.
+## Install Dependencies
 
-This mode is recommended because it keeps the executable and persistent local files together more predictably.
-
-## Install dependencies
-
-```bash
-pip install -r requirements.txt
+```powershell
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-## Recommended build
+Install Inno Setup if you want a setup executable:
 
-```bash
-pyinstaller --onedir --windowed --name TelegramMessageCleaner telegram_cleanup_gui.py
+```powershell
+choco install innosetup --yes
 ```
 
-## Optional single-file build
+If `iscc` is not available, the build script still creates a portable ZIP.
 
-```bash
-pyinstaller --onefile --windowed --name TelegramMessageCleaner telegram_cleanup_gui.py
+## Build Windows 64-bit
+
+```powershell
+.\scripts\build_windows.ps1 -Arch x64 -AppVersion 1.0.0
 ```
 
-## Output
+## Build Windows 32-bit
 
-After a successful build, PyInstaller creates output under `dist/`.
+Use 32-bit Python, then run:
 
-Recommended executable path for the `--onedir` build:
-
-```text
-dist/TelegramMessageCleaner/TelegramMessageCleaner.exe
+```powershell
+.\scripts\build_windows.ps1 -Arch x86 -AppVersion 1.0.0
 ```
 
-## Persistent local files
+## Outputs
 
-When the app runs as a frozen executable, it stores persistent local files next to the executable, not inside a temporary PyInstaller extraction folder.
+Local output goes to `release/`:
 
-Expected files:
+- `TelegramMessageCleaner-windows-x64-portable.zip`
+- `TelegramMessageCleaner-windows-x86-portable.zip`
+- `windows-x64-installer/TelegramMessageCleaner-windows-x64-setup.exe`
+- `windows-x86-installer/TelegramMessageCleaner-windows-x86-setup.exe`
+
+`release/` is ignored by git.
+
+## GitHub Actions
+
+The workflow `.github/workflows/release-artifacts.yml` builds Windows x64, Windows x86, and macOS ARM artifacts. Push a `v*` tag to publish artifacts to GitHub Releases, or run the workflow manually to download artifacts from the workflow run.
+
+## Runtime Files
+
+When the app runs as a frozen executable, local runtime files are stored next to the executable:
 
 - `telegram_message_cleaner_config.json`
 - `telegram_message_cleaner.session`
@@ -46,9 +56,4 @@ Expected files:
 - `telegram_message_cleaner_failed.sqlite3`
 - `TelegramMessageCleaner_Logs/`
 
-## Notes
-
-- `--onedir` is the safer first target.
-- `--onefile` is supported but can be less convenient for debugging.
-- Do not distribute your own session file with the build.
-- Another person should run the EXE locally and authorize with their own Telegram account and credentials.
+Do not distribute your own session file with a release.
