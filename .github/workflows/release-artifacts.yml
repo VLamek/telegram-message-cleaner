@@ -41,6 +41,7 @@ jobs:
           path: |
             release/TelegramMessageCleaner-windows-${{ matrix.arch }}-portable.zip
             release/windows-${{ matrix.arch }}-installer/*.exe
+            release/TelegramMessageCleaner-windows-${{ matrix.arch }}-sha256.txt
 
   macos-arm:
     name: macOS ARM
@@ -60,6 +61,7 @@ jobs:
           path: |
             release/TelegramMessageCleaner-macos-arm64.dmg
             release/TelegramMessageCleaner-macos-arm64-app.zip
+            release/TelegramMessageCleaner-macos-arm64-sha256.txt
 
   publish:
     name: Publish GitHub Release

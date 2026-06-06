@@ -33,6 +33,7 @@ rm -rf "$DIST_PATH" "$WORK_PATH"
 APP_PATH="$DIST_PATH/TelegramMessageCleaner.app"
 DMG_PATH="$RELEASE_ROOT/TelegramMessageCleaner-macos-arm64.dmg"
 ZIP_PATH="$RELEASE_ROOT/TelegramMessageCleaner-macos-arm64-app.zip"
+CHECKSUM_PATH="$RELEASE_ROOT/TelegramMessageCleaner-macos-arm64-sha256.txt"
 DMG_BACKGROUND_NAME="dmg-background.png"
 
 if [[ ! -d "$APP_PATH" ]]; then
@@ -107,6 +108,8 @@ trap - EXIT
 
 hdiutil convert "$DMG_RW_PATH" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH"
 rm -f "$DMG_RW_PATH"
+shasum -a 256 "$ZIP_PATH" "$DMG_PATH" > "$CHECKSUM_PATH"
 
 echo "macOS ARM app zip: $ZIP_PATH"
 echo "macOS ARM DMG: $DMG_PATH"
+echo "macOS ARM SHA-256 checksums: $CHECKSUM_PATH"

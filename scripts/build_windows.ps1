@@ -11,6 +11,7 @@ $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $releaseRoot = Join-Path $root "release"
 $distPath = Join-Path $releaseRoot "windows-$Arch"
 $workPath = Join-Path $root "build\windows-$Arch"
+$checksumPath = Join-Path $releaseRoot "TelegramMessageCleaner-windows-$Arch-sha256.txt"
 
 Set-Location $root
 if (Test-Path -LiteralPath $distPath) {
@@ -96,6 +97,20 @@ if ($isccPath) {
     }
 }
 
+$checksumTargets = @($zipPath)
+if ($isccPath) {
+    $cleanInstallerPath = Join-Path $releaseRoot "installers\TelegramMessageCleaner-windows-$Arch-setup.exe"
+    if (Test-Path -LiteralPath $cleanInstallerPath) {
+        $checksumTargets += $cleanInstallerPath
+    }
+}
+$checksumTargets |
+    ForEach-Object {
+        $hash = Get-FileHash -LiteralPath $_ -Algorithm SHA256
+        "$($hash.Hash)  $(Split-Path -Leaf $_)"
+    } |
+    Set-Content -LiteralPath $checksumPath -Encoding ASCII
+
 Write-Host "Windows $Arch portable package: $zipPath"
 if ($isccPath) {
     Write-Host "Windows $Arch installer output: $installerOut"
@@ -103,3 +118,4 @@ if ($isccPath) {
 } else {
     Write-Host "Inno Setup is not installed; skipped installer .exe generation."
 }
+Write-Host "Windows $Arch SHA-256 checksums: $checksumPath"

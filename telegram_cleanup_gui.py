@@ -11,7 +11,6 @@ from typing import Any, Callable
 
 from telegram_cleanup_core import (
     APP_NAME,
-    DB_FILE_NAME,
     MESSAGE_TYPE_OPTIONS,
     RunControl,
     SUPPORTED_LANGUAGES,
@@ -745,8 +744,17 @@ class TelegramCleanupGUI:
         if message_types is None:
             return
         if len(chat_ids) > 1:
-            if self.require_confirmation_var.get() and not self._confirm_multi_chat_deletion(chat_ids, date_from, date_to, message_types):
-                self._append_log("Multi-chat cleanup cancelled by user before deletion.")
+            if self.require_confirmation_var.get():
+                self.pending_cleanup_request = {
+                    "mode": "cleanup",
+                    "chat_ids": chat_ids,
+                    "batch_size": batch_size,
+                    "pause_seconds": pause_seconds,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "message_types": message_types,
+                }
+                self._launch_worker("prepare_multi_cleanup", self.core.get_chat_overviews, chat_ids)
                 return
             self._launch_multi_chat_worker("cleanup", chat_ids, batch_size, pause_seconds, date_from, date_to, message_types)
             return
@@ -781,8 +789,17 @@ class TelegramCleanupGUI:
         if message_types is None:
             return
         if len(chat_ids) > 1:
-            if self.require_confirmation_var.get() and not self._confirm_multi_chat_deletion(chat_ids, date_from, date_to, message_types):
-                self._append_log("Multi-chat delete indexed only cancelled by user before deletion.")
+            if self.require_confirmation_var.get():
+                self.pending_cleanup_request = {
+                    "mode": "delete_indexed_only",
+                    "chat_ids": chat_ids,
+                    "batch_size": batch_size,
+                    "pause_seconds": pause_seconds,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "message_types": message_types,
+                }
+                self._launch_worker("prepare_multi_delete_indexed_only", self.core.get_chat_overviews, chat_ids)
                 return
             self._launch_multi_chat_worker("delete_indexed_only", chat_ids, batch_size, pause_seconds, date_from, date_to, message_types)
             return
@@ -1111,7 +1128,7 @@ class TelegramCleanupGUI:
             initialdir=str(self.core.get_database_path().parent),
             initialfile=self.core.get_database_path().name,
             defaultextension=".sqlite3",
-            filetypes=[("SQLite database", "*.sqlite3"), ("All files", "*.*")],
+            filetypes=[("SQLite database", "*.sqlite3 *.sqlite *.db")],
         )
         if not selected:
             return
@@ -1254,6 +1271,10 @@ class TelegramCleanupGUI:
             self._handle_prepare_cleanup_result(result)
             return
 
+        if action in {"prepare_multi_cleanup", "prepare_multi_delete_indexed_only"}:
+            self._handle_prepare_multi_cleanup_result(list(result or []))
+            return
+
         if action == "list_groups":
             self.chat_selector_dialogs = list(result or [])
             self.chat_selector_filtered_dialogs = list(self.chat_selector_dialogs)
@@ -1349,6 +1370,40 @@ class TelegramCleanupGUI:
                 request.get("date_to"),
                 request.get("message_types"),
             )
+
+    def _handle_prepare_multi_cleanup_result(self, result: list[dict[str, Any]]) -> None:
+        request = self.pending_cleanup_request
+        self.pending_cleanup_request = None
+        if not request:
+            return
+
+        if not result:
+            self._show_error("No chats were resolved for this operation.")
+            return
+
+        if not self._confirm_multi_chat_deletion(
+            result,
+            request.get("date_from"),
+            request.get("date_to"),
+            request.get("message_types"),
+        ):
+            self._append_log("Multi-chat deletion cancelled by user after chat verification.")
+            return
+
+        resolved_chat_ids = [str(overview["chat_id"]) for overview in result]
+        self.selected_chat_titles.update(
+            {str(overview["chat_id"]): str(overview.get("title") or "") for overview in result}
+        )
+        mode = str(request.get("mode") or "cleanup")
+        self._launch_multi_chat_worker(
+            mode,
+            resolved_chat_ids,
+            request["batch_size"],
+            request["pause_seconds"],
+            request.get("date_from"),
+            request.get("date_to"),
+            request.get("message_types"),
+        )
 
     def _show_resume_prompt_if_needed(self) -> None:
         if self.active_worker and self.active_worker.is_alive():
@@ -1933,19 +1988,30 @@ class TelegramCleanupGUI:
 
     def _confirm_multi_chat_deletion(
         self,
-        chat_ids: list[str],
+        chat_overviews: list[dict[str, Any]],
         date_from: str | None,
         date_to: str | None,
         message_types: list[str] | None,
     ) -> bool:
+        preview_lines: list[str] = []
+        for overview in chat_overviews[:20]:
+            title = str(overview.get("title") or self.translator.gettext("none"))
+            chat_id = str(overview.get("chat_id") or overview.get("input") or "")
+            chat_type = str(overview.get("chat_type") or "unknown")
+            preview_lines.append(f"- {title} ({chat_type}) | Chat ID: {chat_id}")
+        remaining = len(chat_overviews) - len(preview_lines)
+        if remaining > 0:
+            preview_lines.append(f"- ... and {remaining} more")
+        resolved_details = "\n".join(preview_lines)
+        base_message = self.translator.gettext(
+            "confirm_multi_cleanup_message",
+            count=len(chat_overviews),
+            date_range=self._format_date_range_for_display(date_from, date_to),
+            message_types=self._format_message_types_for_display(message_types),
+        )
         return messagebox.askyesno(
             self.translator.gettext("confirm_cleanup_title"),
-            self.translator.gettext(
-                "confirm_multi_cleanup_message",
-                count=len(chat_ids),
-                date_range=self._format_date_range_for_display(date_from, date_to),
-                message_types=self._format_message_types_for_display(message_types),
-            ),
+            f"{base_message}\n\nResolved chats:\n{resolved_details}",
         )
 
     def _format_date_range_for_display(self, date_from: str | None, date_to: str | None) -> str:
@@ -2459,7 +2525,7 @@ class TelegramCleanupGUI:
 
 def main() -> None:
     root = tk.Tk()
-    app = TelegramCleanupGUI(root)
+    TelegramCleanupGUI(root)
     root.mainloop()
 
 

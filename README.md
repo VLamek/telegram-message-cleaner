@@ -48,6 +48,8 @@ Release artifacts are built by GitHub Actions from this repository:
 
 Portable ZIP packages may also be attached for Windows and macOS for users who prefer not to run an installer.
 
+Release artifacts include `*-sha256.txt` checksum files. Use them to verify that a downloaded installer or ZIP matches the artifact produced by GitHub Actions.
+
 ## 5. Which Installer To Choose
 
 - Windows 64-bit: choose `TelegramMessageCleaner-windows-x64-setup.exe` for most Windows 10/11 computers.
@@ -127,7 +129,7 @@ Then click one of:
 - `Delete indexed only` to delete already indexed messages;
 - `Retry failed` to retry records from the failed database.
 
-If confirmation is enabled, the app shows the selected chat, known indexed count, date range, message types, and an irreversible deletion warning before deleting.
+If confirmation is enabled, the app shows the selected chat, known indexed count, date range, message types, and an irreversible deletion warning before deleting. For multiple selected chats, it first resolves each chat and shows the resolved title, type, and Chat ID.
 
 ## 10. If Deletion Was Interrupted
 
@@ -188,6 +190,8 @@ Run basic tests:
 python -m unittest discover -s tests
 python -m compileall telegram_cleanup_gui.py telegram_cleanup_core.py telegram_cleanup_i18n.py telegram_cleanup_storage.py telegram_cleanup_cli.py
 ```
+
+CLI deletion commands require an interactive `DELETE` confirmation. For trusted automation, pass `--yes` explicitly to `delete`, `delete-indexed`, or `retry-failed`.
 
 Build a local Windows package:
 
@@ -253,3 +257,18 @@ When running as a frozen Windows build, local runtime files are stored next to t
 - `TelegramMessageCleaner_Logs/history.log`
 
 Do not distribute your session file. Another person must use their own Telegram account, API ID, API Hash, phone number, login code, and 2FA password.
+
+To fully remove local app data:
+
+- macOS frozen build: delete `~/Library/Application Support/TelegramMessageCleaner/`.
+- Windows frozen build: delete the app folder that contains `telegram_message_cleaner_config.json`, `telegram_message_cleaner.session`, local SQLite databases, and `TelegramMessageCleaner_Logs/`.
+- Source checkout: local data defaults to the user app data directory or `.local_data/` only when no OS app data directory is available.
+
+## Security And Vulnerability Reporting
+
+This is a local tool with no backend service. The highest-impact secrets are your Telegram session file, API Hash, phone number, and local progress databases.
+
+- Do not publish `.env`, `telegram_message_cleaner_config.json`, `.session`, `.sqlite3`, logs, crash dumps, or release/build directories from your machine.
+- Treat a leaked Telegram session as compromised: log out from the app and revoke the session from Telegram devices if needed.
+- Report vulnerabilities through GitHub Issues only when you can describe the problem without posting secrets or private chat/account data.
+- If a report requires sensitive details, first open a minimal public issue asking for a private contact path.

@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as datetime_time, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 try:
     from dotenv import load_dotenv
@@ -65,6 +65,7 @@ MESSAGE_TYPE_OPTIONS = (
     "poll",
     "other",
 )
+ALLOWED_DATABASE_SUFFIXES = {".sqlite3", ".sqlite", ".db"}
 
 EventCallback = Callable[[dict[str, Any]], None]
 
@@ -392,9 +393,10 @@ class TelegramCleanupCore:
 
     def set_db_file(self, db_file: str, persist: bool = True) -> Path:
         db_file = db_file.strip() or DB_FILE_NAME
+        self._resolve_database_path(db_file)
         if persist:
-            self.save_config({"db_file": db_file})
             self._db_file_override = None
+            self.save_config({"db_file": db_file})
         else:
             self._db_file_override = db_file
             self.storage = ProgressStorage(self.get_database_path(), self.get_failed_database_path())
@@ -402,10 +404,34 @@ class TelegramCleanupCore:
 
     def get_database_path(self) -> Path:
         db_value = self._db_file_override or self.config.get("db_file") or DB_FILE_NAME
-        candidate = Path(str(db_value))
+        return self._resolve_database_path(str(db_value))
+
+    def _resolve_database_path(self, db_value: str) -> Path:
+        raw_value = db_value.strip() or DB_FILE_NAME
+        candidate = Path(raw_value).expanduser()
         if not candidate.is_absolute():
-            candidate = self.data_dir / candidate
-        return candidate.resolve()
+            candidate = (self.data_dir / candidate).resolve()
+            try:
+                candidate.relative_to(self.data_dir.resolve())
+            except ValueError as exc:
+                raise ValueError("Relative database paths must stay inside the app data directory.") from exc
+        else:
+            candidate = candidate.resolve()
+
+        if candidate.suffix.lower() not in ALLOWED_DATABASE_SUFFIXES:
+            allowed = ", ".join(sorted(ALLOWED_DATABASE_SUFFIXES))
+            raise ValueError(f"Database file must use one of these extensions: {allowed}.")
+        if candidate.exists() and candidate.is_dir():
+            raise ValueError("Database path points to a directory, not a SQLite file.")
+
+        protected_names = {
+            CONFIG_FILE_NAME,
+            f"{SESSION_FILE_STEM}.session",
+            f"{SESSION_FILE_STEM}.session-journal",
+        }
+        if candidate.name in protected_names:
+            raise ValueError("Database path must not point to config or Telegram session files.")
+        return candidate
 
     def get_failed_database_path(self) -> Path:
         return self.get_database_path().with_name(FAILED_DB_FILE_NAME).resolve()
@@ -452,6 +478,9 @@ class TelegramCleanupCore:
 
     def get_chat_overview(self, chat_input: str) -> dict[str, Any]:
         return asyncio.run(self._get_chat_overview_async(chat_input))
+
+    def get_chat_overviews(self, chat_inputs: Iterable[str]) -> list[dict[str, Any]]:
+        return asyncio.run(self._get_chat_overviews_async(chat_inputs))
 
     def index_messages(
         self,
@@ -906,24 +935,45 @@ class TelegramCleanupCore:
                 raise PermissionError("Authorize the Telegram account first.")
 
             entity = await self._resolve_chat_entity(client, chat_input)
-            chat_id = str(utils.get_peer_id(entity))
-            title = self._get_entity_title(entity)
-            username = getattr(entity, "username", None)
-            chat_type = self._detect_chat_type(entity)
-            self.storage.upsert_chat(chat_id, title, username, chat_type, "ready")
-            state = self.storage.get_status_counts(chat_id)
-            recent_run = self.storage.get_recent_run(chat_id)
-            overview = {
-                "chat_id": chat_id,
-                "title": title,
-                "username": username,
-                "chat_type": chat_type,
-                "counts": state,
-                "index_state": self.storage.get_chat_index_state(chat_id),
-                "recent_run": recent_run,
-            }
+            overview = self._build_chat_overview(entity)
             self._emit("chat_overview", overview=overview)
             return overview
+
+    async def _get_chat_overviews_async(self, chat_inputs: Iterable[str]) -> list[dict[str, Any]]:
+        async with self._connected_client() as client:
+            if not await client.is_user_authorized():
+                raise PermissionError("Authorize the Telegram account first.")
+
+            overviews: list[dict[str, Any]] = []
+            seen_chat_ids: set[str] = set()
+            for chat_input in chat_inputs:
+                entity = await self._resolve_chat_entity(client, chat_input)
+                overview = self._build_chat_overview(entity)
+                chat_id = str(overview["chat_id"])
+                if chat_id in seen_chat_ids:
+                    continue
+                seen_chat_ids.add(chat_id)
+                overview["input"] = chat_input
+                overviews.append(overview)
+            return overviews
+
+    def _build_chat_overview(self, entity: Any) -> dict[str, Any]:
+        chat_id = str(utils.get_peer_id(entity))
+        title = self._get_entity_title(entity)
+        username = getattr(entity, "username", None)
+        chat_type = self._detect_chat_type(entity)
+        self.storage.upsert_chat(chat_id, title, username, chat_type, "ready")
+        state = self.storage.get_status_counts(chat_id)
+        recent_run = self.storage.get_recent_run(chat_id)
+        return {
+            "chat_id": chat_id,
+            "title": title,
+            "username": username,
+            "chat_type": chat_type,
+            "counts": state,
+            "index_state": self.storage.get_chat_index_state(chat_id),
+            "recent_run": recent_run,
+        }
 
     async def _index_messages_async(
         self,
@@ -1615,7 +1665,7 @@ class TelegramCleanupCore:
         date_range: MessageDateRange,
         type_filter: MessageTypeFilter,
     ) -> tuple[list[int], list[int]]:
-        await self._delete_batch_with_flood_wait(
+        delete_attempted = await self._delete_batch_with_flood_wait(
             client=client,
             entity=entity,
             chat_id=chat_id,
@@ -1628,6 +1678,8 @@ class TelegramCleanupCore:
             date_range=date_range,
             type_filter=type_filter,
         )
+        if not delete_attempted:
+            return [], []
         return await self._verify_deleted_message_ids(client, entity, message_ids)
 
     async def _delete_batch_with_flood_wait(
@@ -1643,11 +1695,11 @@ class TelegramCleanupCore:
         control: RunControl,
         date_range: MessageDateRange,
         type_filter: MessageTypeFilter,
-    ) -> None:
+    ) -> bool:
         while True:
             try:
                 await client.delete_messages(entity, message_ids, revoke=True)
-                return
+                return True
             except errors.FloodWaitError as exc:
                 wait_seconds = int(exc.seconds) + 5
                 self._log(
@@ -1670,6 +1722,15 @@ class TelegramCleanupCore:
                         date_range=date_range,
                         type_filter=type_filter,
                     )
+                    if control.terminal_status():
+                        self._log(
+                            "info",
+                            "Telegram FloodWait wait interrupted by user request.",
+                            chat_id=chat_id,
+                            title=title,
+                            batch_number=batch_number,
+                        )
+                        return False
                     await asyncio.sleep(1)
                 continue
 

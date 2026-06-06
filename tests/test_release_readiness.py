@@ -11,14 +11,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from telegram_cleanup_core import (
+from telegram_cleanup_cli import build_parser  # noqa: E402
+from telegram_cleanup_core import (  # noqa: E402
     ConfigStore,
     SUPPORTED_LANGUAGES,
     TelegramCleanupCore,
     get_runtime_data_dir,
     parse_message_date_range,
 )
-from telegram_cleanup_i18n import TRANSLATIONS
+from telegram_cleanup_i18n import TRANSLATIONS  # noqa: E402
 
 
 class ReleaseReadinessTests(unittest.TestCase):
@@ -87,6 +88,25 @@ class ReleaseReadinessTests(unittest.TestCase):
                 expected_dir = (home / "Library" / "Application Support" / "TelegramMessageCleaner").resolve()
                 self.assertEqual(expected_dir / "telegram_message_cleaner.session", core.get_session_file_path())
                 self.assertEqual(expected_dir / "telegram_message_cleaner", core.get_session_base_path())
+
+    def test_database_path_rejects_relative_traversal_and_non_sqlite_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            with patch("telegram_cleanup_core.get_runtime_data_dir", return_value=data_dir):
+                core = TelegramCleanupCore(app_dir=Path(tmp_dir))
+                with self.assertRaises(ValueError):
+                    core.set_db_file("../outside.sqlite3")
+                with self.assertRaises(ValueError):
+                    core.set_db_file("telegram_message_cleaner_config.json")
+
+                db_path = core.set_db_file("custom.sqlite3", persist=False)
+                self.assertEqual((data_dir / "custom.sqlite3").resolve(), db_path)
+
+    def test_destructive_cli_commands_have_explicit_yes_flag(self) -> None:
+        parser = build_parser()
+        for command in ("delete", "delete-indexed", "retry-failed"):
+            args = parser.parse_args([command, "--chat-id", "-100123", "--yes"])
+            self.assertTrue(args.yes, command)
 
 
 if __name__ == "__main__":

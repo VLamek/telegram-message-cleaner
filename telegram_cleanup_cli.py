@@ -31,6 +31,14 @@ def add_message_type_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_destructive_confirmation_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm this destructive Telegram deletion command without an interactive prompt.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Telegram Message Cleaner CLI")
     parser.add_argument("--db-file", default=DB_FILE_NAME, help="SQLite progress database file")
@@ -48,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     delete_parser.add_argument("--chat-id", required=True, help="Telegram chat ID")
     delete_parser.add_argument("--batch-size", type=int, default=100, help="Delete batch size")
     delete_parser.add_argument("--pause", type=float, default=2.0, help="Pause between batches in seconds")
+    add_destructive_confirmation_argument(delete_parser)
     add_date_range_arguments(delete_parser)
     add_message_type_arguments(delete_parser)
 
@@ -58,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     delete_indexed_parser.add_argument("--chat-id", required=True, help="Telegram chat ID")
     delete_indexed_parser.add_argument("--batch-size", type=int, default=100, help="Delete batch size")
     delete_indexed_parser.add_argument("--pause", type=float, default=2.0, help="Pause between batches in seconds")
+    add_destructive_confirmation_argument(delete_indexed_parser)
     add_date_range_arguments(delete_indexed_parser)
     add_message_type_arguments(delete_indexed_parser)
 
@@ -65,10 +75,29 @@ def build_parser() -> argparse.ArgumentParser:
     retry_parser.add_argument("--chat-id", required=True, help="Telegram chat ID")
     retry_parser.add_argument("--batch-size", type=int, default=100, help="Delete batch size")
     retry_parser.add_argument("--pause", type=float, default=2.0, help="Pause between batches in seconds")
+    add_destructive_confirmation_argument(retry_parser)
     add_date_range_arguments(retry_parser)
     add_message_type_arguments(retry_parser)
 
     return parser
+
+
+def confirm_destructive_command(args: argparse.Namespace) -> None:
+    if getattr(args, "yes", False):
+        return
+    command = str(args.command)
+    chat_id = str(getattr(args, "chat_id", ""))
+    details = (
+        f"Command '{command}' will delete Telegram messages for chat '{chat_id}'.\n"
+        f"Date range: {getattr(args, 'from_date', 'first')} -> {getattr(args, 'to_date', 'last')}\n"
+        f"Message types: {getattr(args, 'message_types', 'all')}\n"
+        "Type DELETE to continue: "
+    )
+    if not sys.stdin.isatty():
+        raise RuntimeError(f"Refusing to run destructive '{command}' without --yes in a non-interactive shell.")
+    answer = input(details)
+    if answer.strip() != "DELETE":
+        raise RuntimeError("Deletion cancelled.")
 
 
 def main() -> int:
@@ -97,6 +126,7 @@ def main() -> int:
             return 0
 
         if args.command == "delete":
+            confirm_destructive_command(args)
             result = core.start_cleanup(
                 chat_input=args.chat_id,
                 batch_size=args.batch_size,
@@ -109,6 +139,7 @@ def main() -> int:
             return 0
 
         if args.command == "delete-indexed":
+            confirm_destructive_command(args)
             result = core.delete_indexed_only(
                 chat_input=args.chat_id,
                 batch_size=args.batch_size,
@@ -121,6 +152,7 @@ def main() -> int:
             return 0
 
         if args.command == "retry-failed":
+            confirm_destructive_command(args)
             result = core.retry_failed(
                 chat_input=args.chat_id,
                 batch_size=args.batch_size,
