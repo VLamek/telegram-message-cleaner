@@ -11,7 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from telegram_cleanup_core import ConfigStore, SUPPORTED_LANGUAGES, get_runtime_data_dir, parse_message_date_range
+from telegram_cleanup_core import (
+    ConfigStore,
+    SUPPORTED_LANGUAGES,
+    TelegramCleanupCore,
+    get_runtime_data_dir,
+    parse_message_date_range,
+)
 from telegram_cleanup_i18n import TRANSLATIONS
 
 
@@ -67,6 +73,20 @@ class ReleaseReadinessTests(unittest.TestCase):
                 data_dir = get_runtime_data_dir()
                 self.assertEqual(home / "Library" / "Application Support" / "TelegramMessageCleaner", data_dir)
                 self.assertTrue(data_dir.exists())
+
+    def test_macos_frozen_session_uses_application_support(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            home = Path(tmp_dir) / "home"
+            app_dir = Path(tmp_dir) / "TelegramMessageCleaner.app" / "Contents" / "MacOS"
+            with (
+                patch.object(sys, "frozen", True, create=True),
+                patch.object(sys, "platform", "darwin"),
+                patch("telegram_cleanup_core.Path.home", return_value=home),
+            ):
+                core = TelegramCleanupCore(app_dir=app_dir)
+                expected_dir = (home / "Library" / "Application Support" / "TelegramMessageCleaner").resolve()
+                self.assertEqual(expected_dir / "telegram_message_cleaner.session", core.get_session_file_path())
+                self.assertEqual(expected_dir / "telegram_message_cleaner", core.get_session_base_path())
 
 
 if __name__ == "__main__":

@@ -62,4 +62,6 @@ When the app runs as a frozen executable, local runtime files are stored next to
 - `telegram_message_cleaner_failed.sqlite3`
 - `TelegramMessageCleaner_Logs/`
 
+The config file may contain a Telegram API Hash and phone number in plain text. Treat it as private account data and do not include it in shared archives, installers, screenshots, or support requests.
+
 Do not distribute your own session file with a release.

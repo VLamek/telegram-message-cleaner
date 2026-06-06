@@ -416,6 +416,9 @@ class TelegramCleanupCore:
     def get_session_file_path(self) -> Path:
         return (self.data_dir / f"{SESSION_FILE_STEM}.session").resolve()
 
+    def get_session_base_path(self) -> Path:
+        return self.get_session_file_path().with_suffix("").resolve()
+
     def delete_local_progress_database(self) -> None:
         db_path = self.get_database_path()
         wal_path = db_path.with_suffix(f"{db_path.suffix}-wal")
@@ -579,9 +582,7 @@ class TelegramCleanupCore:
     async def _connected_client(self) -> Any:
         self._ensure_telethon_available()
         api_id, api_hash = self._require_api_credentials()
-        session_base = (self.app_dir / SESSION_FILE_STEM).resolve()
-        if not getattr(sys, "frozen", False):
-            session_base = (self.data_dir / SESSION_FILE_STEM).resolve()
+        session_base = self.get_session_base_path()
         client = TelegramClient(str(session_base), api_id, api_hash)
         await client.connect()
         try:

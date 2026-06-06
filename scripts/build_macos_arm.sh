@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export COPYFILE_DISABLE=1
+
 APP_VERSION="${APP_VERSION:-1.0.0}"
 PYTHON="${PYTHON:-python3}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -10,6 +12,13 @@ WORK_PATH="$ROOT/build/macos-arm64"
 DMG_STAGING="$WORK_PATH/dmg-staging"
 DMG_RW_PATH="$RELEASE_ROOT/TelegramMessageCleaner-macos-arm64.rw.dmg"
 DMG_VOLUME_NAME="Telegram Message Cleaner $APP_VERSION"
+
+clean_macos_metadata() {
+  local target="$1"
+  if [[ -e "$target" ]]; then
+    find "$target" \( -name ".DS_Store" -o -name "._*" \) -exec rm -rf {} +
+  fi
+}
 
 cd "$ROOT"
 mkdir -p "$RELEASE_ROOT"
@@ -37,9 +46,11 @@ if /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_PATH/Contents/Info.
 else
   /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $APP_VERSION" "$APP_PATH/Contents/Info.plist"
 fi
+clean_macos_metadata "$APP_PATH"
 codesign --force --deep --sign - "$APP_PATH"
 
 rm -f "$DMG_PATH" "$ZIP_PATH"
+clean_macos_metadata "$APP_PATH"
 ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
 rm -rf "$DMG_STAGING"
@@ -47,6 +58,7 @@ mkdir -p "$DMG_STAGING/.background"
 ditto "$APP_PATH" "$DMG_STAGING/TelegramMessageCleaner.app"
 ln -s /Applications "$DMG_STAGING/Applications"
 "$PYTHON" "$ROOT/scripts/create_macos_dmg_background.py" "$DMG_STAGING/.background/$DMG_BACKGROUND_NAME"
+clean_macos_metadata "$DMG_STAGING"
 
 rm -f "$DMG_RW_PATH" "$DMG_PATH"
 hdiutil create -volname "$DMG_VOLUME_NAME" \

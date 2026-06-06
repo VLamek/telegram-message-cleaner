@@ -235,6 +235,8 @@ Run it manually from GitHub Actions or push a `v*` tag. Tag builds publish artif
 
 When running from source, local data is stored outside the repository by default in the user's local app data directory.
 
+The local config file may contain your Telegram API Hash and phone number in plain text. Treat it as private account data: do not attach it to GitHub issues, upload it with release files, or share it with another person.
+
 When running as a frozen macOS build, local runtime files are stored in:
 
 - `~/Library/Application Support/TelegramMessageCleaner/`
